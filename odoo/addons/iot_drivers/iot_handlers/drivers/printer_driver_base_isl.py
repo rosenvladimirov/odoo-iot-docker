@@ -338,9 +338,9 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         """
         Общ ISL mapping (както в BgIslFiscalPrinter, но може да се override-не):
 
-        OperatorError -> "1"
-        Refund        -> "0"
-        TaxBaseReduction -> "2"
+        OperatorError     -> "1"
+        Refund            -> "0"
+        TaxBaseReduction  -> "2"
         """
         if reason == ReversalReason.OPERATOR_ERROR:
             return "1"
@@ -510,6 +510,332 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         """
         resp, status, _ = self._isl_request(self.CMD_GET_DEVICE_INFO, "1")
         return resp, status
+
+    # ---------------------- Net.FP helpers (принт на бон) ----------------------
+
+    def _netfp_parse_payment_type(self, pt: str) -> PaymentType:
+        """
+        Net.FP -> PaymentType enum.
+        Очаква се pt да е 'cash', 'card', 'check', ...
+        """
+        if not pt:
+            return PaymentType.CASH
+        pt_low = pt.lower()
+        for enum_val in PaymentType:
+            if enum_val.value == pt_low:
+                return enum_val
+        return PaymentType.CASH
+
+    def _netfp_parse_reversal_reason(self, reason: str) -> ReversalReason:
+        """
+        Net.FP reason string -> ReversalReason enum.
+        Очаквани стойности: 'operator_error', 'refund', 'tax_base_reduction'.
+        """
+        if not reason:
+            return ReversalReason.OPERATOR_ERROR
+        reason_low = reason.lower()
+        for enum_val in ReversalReason:
+            if enum_val.value == reason_low:
+                return enum_val
+        return ReversalReason.OPERATOR_ERROR
+
+    def _netfp_build_price_modifier(self, item: dict) -> Tuple[PriceModifierType, Decimal]:
+        """
+        Взима от Net.FP item евентуален discount/surcharge и връща
+        (PriceModifierType, Decimal).
+        Предпочитани полета (по приоритет):
+          discountPercent, discountAmount, surchargePercent, surchargeAmount
+        """
+        from decimal import Decimal as D
+
+        if "discountPercent" in item:
+            return PriceModifierType.DISCOUNT_PERCENT, D(str(item["discountPercent"]))
+        if "discountAmount" in item:
+            return PriceModifierType.DISCOUNT_AMOUNT, D(str(item["discountAmount"]))
+        if "surchargePercent" in item:
+            return PriceModifierType.SURCHARGE_PERCENT, D(str(item["surchargePercent"]))
+        if "surchargeAmount" in item:
+            return PriceModifierType.SURCHARGE_AMOUNT, D(str(item["surchargeAmount"]))
+
+        return PriceModifierType.NONE, D("0")
+
+    def _netfp_build_tax_group(self, item: dict) -> TaxGroup:
+        """
+        Net.FP item.taxGroup -> TaxGroup enum.
+        Очаква стойности 'TaxGroup1'..'TaxGroup8' или индекс '1'..'8'.
+        """
+        tg = item.get("taxGroup")
+        if not tg:
+            return TaxGroup.TaxGroup1
+        tg_str = str(tg)
+        # "TaxGroup1" .. "TaxGroup8"
+        if tg_str.startswith("TaxGroup"):
+            try:
+                return TaxGroup[tg_str]
+            except KeyError:
+                return TaxGroup.TaxGroup1
+        # "1".."8"
+        name = f"TaxGroup{tg_str}"
+        return TaxGroup[name] if name in TaxGroup.__members__ else TaxGroup.TaxGroup1
+
+    def _netfp_build_receipt_info(
+        self,
+        close_receipt_response: str,
+        amount: Optional[Decimal],
+    ) -> Dict[str, Any]:
+        """
+        Генерира ReceiptInfo за Net.FP отговор:
+          receiptNumber, receiptDateTime, receiptAmount, fiscalMemorySerialNumber
+        """
+        info: Dict[str, Any] = {}
+
+        # Номер на документа
+        try:
+            last_doc, status_doc = self.get_last_document_number(close_receipt_response)
+            if status_doc.ok:
+                info["receiptNumber"] = last_doc.strip()
+        except Exception:  # noqa: BLE001
+            # игнорираме – ще върнем каквото имаме
+            pass
+
+        # Сума
+        if amount is not None:
+            info["receiptAmount"] = float(amount)
+        else:
+            # втори опит – ако не е подадена
+            try:
+                amt, status_amt = self.get_receipt_amount()
+                if status_amt.ok and amt is not None:
+                    info["receiptAmount"] = float(amt)
+            except Exception:  # noqa: BLE001
+                pass
+
+        # Дата/час от устройството
+        try:
+            dt, status_dt = self.get_date_time()
+            if status_dt.ok and dt:
+                info["receiptDateTime"] = dt.isoformat()
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Фискална памет
+        try:
+            fm, status_fm = self.get_fiscal_memory_serial_number()
+            if status_fm.ok and fm:
+                info["fiscalMemorySerialNumber"] = fm.strip()
+        except Exception:  # noqa: BLE001
+            pass
+
+        return info
+
+    def netfp_print_receipt(self, receipt: Dict[str, Any]) -> Tuple[Dict[str, Any], DeviceStatus]:
+        """
+        Общ Net.FP → ISL „рецепта“ за печат на фискален бон.
+
+        receipt е Net.FP Receipt JSON (dict) с полета като:
+          uniqueSaleNumber, operator, operatorPassword, items[], payments[].
+        """
+        from decimal import Decimal as D
+
+        status = DeviceStatus()
+
+        unique_sale_number = receipt.get("uniqueSaleNumber", "")
+        operator_id = receipt.get("operator", "") or self.options.get("Operator.ID", "1")
+        operator_password = receipt.get("operatorPassword", "") or self.options.get("Operator.Password", "0000")
+
+        # 1) Отваряне на бона
+        _, st = self.open_receipt(unique_sale_number, operator_id, operator_password)
+        if not st.ok:
+            return {}, st
+
+        # 2) Коментари (ако има)
+        for comment in receipt.get("comments", []):
+            text = comment.get("text") if isinstance(comment, dict) else str(comment)
+            _, st = self.add_comment(text or "")
+            if not st.ok:
+                self.abort_receipt()
+                return {}, st
+
+        # 3) Артикули
+        for item in receipt.get("items", []):
+            try:
+                name = item.get("text") or item.get("name") or ""
+                dept = int(item.get("department") or 0)
+                unit_price = D(str(item.get("unitPrice", "0")))
+                quantity = D(str(item.get("quantity", "1")))
+                tax_group = self._netfp_build_tax_group(item)
+                pm_type, pm_value = self._netfp_build_price_modifier(item)
+
+                _, st = self.add_item(
+                    department=dept,
+                    item_text=name,
+                    unit_price=unit_price,
+                    tax_group=tax_group,
+                    quantity=quantity,
+                    price_modifier_value=pm_value,
+                    price_modifier_type=pm_type,
+                )
+                if not st.ok:
+                    self.abort_receipt()
+                    return {}, st
+            except Exception as e:  # noqa: BLE001
+                self.abort_receipt()
+                err = DeviceStatus()
+                err.add_error("E400", f"Invalid item format: {e}")
+                return {}, err
+
+        # 4) Плащания
+        payments = receipt.get("payments") or []
+        close_resp = ""
+        if not payments:
+            # ако няма дадени плащания – пълен платеж с остатъка
+            close_resp, st = self.full_payment()
+            if not st.ok:
+                self.abort_receipt()
+                return {}, st
+        else:
+            for p in payments:
+                try:
+                    amount = D(str(p.get("amount", "0")))
+                    pt = self._netfp_parse_payment_type(p.get("paymentType"))
+                    _, st = self.add_payment(amount, pt)
+                    if not st.ok:
+                        self.abort_receipt()
+                        return {}, st
+                except Exception as e:  # noqa: BLE001
+                    self.abort_receipt()
+                    err = DeviceStatus()
+                    err.add_error("E400", f"Invalid payment format: {e}")
+                    return {}, err
+            # след последното плащане – затваряме бона
+            close_resp, st = self.close_receipt()
+            if not st.ok:
+                self.abort_receipt()
+                return {}, st
+
+        # 5) Събиране на информация за отговора
+        try:
+            # опит за конкретна сума от JSON
+            total_amount = receipt.get("totalAmount")
+            total_amount_dec = D(str(total_amount)) if total_amount is not None else None
+        except Exception:  # noqa: BLE001
+            total_amount_dec = None
+
+        info = self._netfp_build_receipt_info(close_resp, total_amount_dec or None)
+        return info, st
+
+    def netfp_print_reversal_receipt(self, receipt: Dict[str, Any]) -> Tuple[Dict[str, Any], DeviceStatus]:
+        """
+        Общ Net.FP → ISL „рецепта“ за сторно бон (ReversalReceipt).
+
+        Очаквани ключове в receipt:
+          reason, receiptNumber, receiptDateTime, fiscalMemorySerialNumber,
+          uniqueSaleNumber, operator, operatorPassword, items[], payments[].
+        """
+        from decimal import Decimal as D
+
+        status = DeviceStatus()
+
+        reason = self._netfp_parse_reversal_reason(receipt.get("reason"))
+        original_number = receipt.get("receiptNumber", "")
+        original_dt_str = receipt.get("receiptDateTime", "")
+        fiscal_mem = receipt.get("fiscalMemorySerialNumber", "")
+
+        unique_sale_number = receipt.get("uniqueSaleNumber", "")
+        operator_id = receipt.get("operator", "") or self.options.get("Administrator.ID", "20")
+        operator_password = receipt.get("operatorPassword", "") or self.options.get("Administrator.Password", "9999")
+
+        try:
+            # приемаме ISO формат от Net.FP
+            original_dt = datetime.fromisoformat(original_dt_str) if original_dt_str else datetime.now()
+        except ValueError:
+            original_dt = datetime.now()
+
+        # 1) Отваряне на сторно бон
+        _, st = self.open_reversal_receipt(
+            reason=reason,
+            receipt_number=original_number,
+            receipt_datetime=original_dt,
+            fiscal_memory_serial_number=fiscal_mem,
+            unique_sale_number=unique_sale_number,
+            operator_id=operator_id,
+            operator_password=operator_password,
+        )
+        if not st.ok:
+            return {}, st
+
+        # 2) Коментари (ако има)
+        for comment in receipt.get("comments", []):
+            text = comment.get("text") if isinstance(comment, dict) else str(comment)
+            _, st = self.add_comment(text or "")
+            if not st.ok:
+                self.abort_receipt()
+                return {}, st
+
+        # 3) Артикули (сторно редове)
+        for item in receipt.get("items", []):
+            try:
+                name = item.get("text") or item.get("name") or ""
+                dept = int(item.get("department") or 0)
+                unit_price = D(str(item.get("unitPrice", "0")))
+                quantity = D(str(item.get("quantity", "1")))
+                tax_group = self._netfp_build_tax_group(item)
+                pm_type, pm_value = self._netfp_build_price_modifier(item)
+
+                _, st = self.add_item(
+                    department=dept,
+                    item_text=name,
+                    unit_price=unit_price,
+                    tax_group=tax_group,
+                    quantity=quantity,
+                    price_modifier_value=pm_value,
+                    price_modifier_type=pm_type,
+                )
+                if not st.ok:
+                    self.abort_receipt()
+                    return {}, st
+            except Exception as e:  # noqa: BLE001
+                self.abort_receipt()
+                err = DeviceStatus()
+                err.add_error("E400", f"Invalid reversal item format: {e}")
+                return {}, err
+
+        # 4) Плащания
+        payments = receipt.get("payments") or []
+        close_resp = ""
+        if not payments:
+            close_resp, st = self.full_payment()
+            if not st.ok:
+                self.abort_receipt()
+                return {}, st
+        else:
+            for p in payments:
+                try:
+                    amount = D(str(p.get("amount", "0")))
+                    pt = self._netfp_parse_payment_type(p.get("paymentType"))
+                    _, st = self.add_payment(amount, pt)
+                    if not st.ok:
+                        self.abort_receipt()
+                        return {}, st
+                except Exception as e:  # noqa: BLE001
+                    self.abort_receipt()
+                    err = DeviceStatus()
+                    err.add_error("E400", f"Invalid reversal payment format: {e}")
+                    return {}, err
+            close_resp, st = self.close_receipt()
+            if not st.ok:
+                self.abort_receipt()
+                return {}, st
+
+        # 5) ReceiptInfo за отговора
+        try:
+            total_amount = receipt.get("totalAmount")
+            total_amount_dec = D(str(total_amount)) if total_amount is not None else None
+        except Exception:  # noqa: BLE001
+            total_amount_dec = None
+
+        info = self._netfp_build_receipt_info(close_resp, total_amount_dec or None)
+        return info, st
 
     # ---------------------- Поддръжка / избор на устройство ----------------------
 
