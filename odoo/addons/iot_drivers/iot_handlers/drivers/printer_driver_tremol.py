@@ -4,7 +4,7 @@ import logging
 import serial
 import time
 from enum import Enum
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 from odoo.addons.iot_drivers.iot_handlers.drivers.serial_base_driver import (
     SerialDriver,
@@ -489,9 +489,10 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
     ISL-базиран IoT драйвер за Tremol.
 
     - Наследява общия IslFiscalPrinterBase;
-    - Ниско ниво `_isl_request` ще използва Tremol‑подобен фрейминг
-      (STX/LEN/NBL/CMD/DATA/CS/ETX) – TODO;
-    - Тук са само Tremol‑специфичните mapping-и (TaxGroup, PaymentType и др.).
+    - Използва Tremol master/slave фрейминг (STX/LEN/NBL/CMD/DATA/CS/ETX)
+      за имплементация на _isl_request;
+    - Mapping-и за TaxGroup и PaymentType;
+    - POS → ISL действия са вързани към базовите POS helper-и.
     """
 
     _protocol = TremolIslProtocol
@@ -512,6 +513,7 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
                 "Operator.Password": "000000",
             }
         )
+        self._message_counter = 0x20
         # POS → ISL действия по стандартния IoT канал
         self._actions.update({
             "pos_print_receipt": self._action_pos_print_receipt,
@@ -523,7 +525,199 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
             "pos_print_duplicate": self._action_pos_print_duplicate,
         })
 
-    # ---------------------- IoT POS actions → базовите POS helper-и ----------------------
+    # ---------------------- Tremol master/slave фрейминг за ISL ----------------------
+
+    def _get_next_message_number(self) -> int:
+        num = self._message_counter
+        self._message_counter += 1
+        if self._message_counter > 0x9F:
+            self._message_counter = 0x20
+        return num
+
+    def _calculate_checksum(self, data: bytes) -> int:
+        """XOR checksum върху LEN+NBL+CMD+DATA."""
+        checksum = 0
+        for b in data:
+            checksum ^= b
+        return checksum & 0xFF
+
+    def _format_checksum(self, checksum: int) -> bytes:
+        """2 ASCII байта (0x30 + nibble)."""
+        high = ((checksum >> 4) & 0x0F) + 0x30
+        low = (checksum & 0x0F) + 0x30
+        return bytes([high, low])
+
+    def _parse_checksum(self, checksum_bytes: bytes) -> int:
+        if len(checksum_bytes) != 2:
+            return 0
+        high = (checksum_bytes[0] - 0x30) << 4
+        low = checksum_bytes[1] - 0x30
+        return (high | low) & 0xFF
+
+    def _build_message(self, command: int, data: str = "") -> bytes:
+        """
+        STX LEN NBL CMD DATA CS1 CS2 ETX – стандартен Tremol frame.
+        LEN = 0x20 + (1 (LEN) + 1 (NBL) + 1 (CMD) + len(DATA)).
+        """
+        data_bytes = data.encode("cp1251") if data else b""
+
+        length = 3 + len(data_bytes)
+        len_byte = length + 0x20
+
+        nbl = self._get_next_message_number()
+        core = bytes([len_byte, nbl, command & 0xFF]) + data_bytes
+
+        checksum = self._calculate_checksum(core)
+        cs = self._format_checksum(checksum)
+
+        msg = b"\x02" + core + cs + b"\x0A"
+        return msg
+
+    def _send_message_raw(self, message: bytes) -> bytes:
+        if not self._connection or not self._connection.is_open:
+            raise FiscalPrinterError("CONNECTION", "Not connected to printer")
+
+        self._connection.write(message)
+        self._connection.flush()
+        response = self._connection.read(1024)
+        return response
+
+    def _parse_response_frame(self, response: bytes) -> Tuple[str, DeviceStatus, bytes]:
+        """
+        Парсва Tremol ACK/DATA отговор и го конвертира към
+        (ASCII payload, DeviceStatus, raw_status_bytes).
+        """
+        status = DeviceStatus()
+
+        if len(response) < 7:
+            status.add_error("E101", "Invalid response length")
+            return "", status, b""
+
+        first = response[0]
+
+        # ACK frame
+        if first == 0x06:
+            # <ACK><NBL><STE1><STE2><CS1><CS2><ETX>
+            if len(response) < 7:
+                status.add_error("E101", "Invalid ACK frame length")
+                return "", status, b""
+
+            ste1 = chr(response[2])
+            ste2 = chr(response[3])
+            status_code = ste1 + ste2
+
+            # checksum LEN=N/A, но по протокола XOR върху NBL+STE1+STE2
+            calc = self._calculate_checksum(response[1:4])
+            got = self._parse_checksum(response[4:6])
+            if calc != got:
+                status.add_error("E107", "Checksum mismatch in ACK")
+                return "", status, b""
+
+            if status_code != "30":
+                # има грешка – мапваме я към DeviceStatus
+                err_msg = ERROR_CODES.get(ste1 + "0", "Unknown error")
+                cmd_msg = COMMAND_ERROR_CODES.get(ste2 + "0", "Unknown command error")
+                status.add_error("E" + status_code, f"{err_msg} / {cmd_msg}")
+            return "", status, b""
+
+        # NACK / RETRY
+        if first == 0x15:
+            status.add_error("E101", "NACK from device")
+            return "", status, b""
+        if first == 0x0E:
+            status.add_error("E101", "Device busy (RETRY)")
+            return "", status, b""
+
+        # DATA frame
+        if first == 0x02:
+            if len(response) < 7:
+                status.add_error("E101", "Invalid DATA frame length")
+                return "", status, b""
+            length = response[1] - 0x20
+            # NBL = response[2]
+            # CMD = response[3]
+            data_len = max(0, length - 3)
+            data_bytes = response[4: 4 + data_len]
+            cs_bytes = response[4 + data_len: 4 + data_len + 2]
+            etx = response[4 + data_len + 2: 4 + data_len + 3]
+
+            if etx != b"\x0A":
+                status.add_error("E107", "Invalid ETX in DATA frame")
+                return "", status, b""
+
+            calc = self._calculate_checksum(response[1: 4 + data_len])
+            got = self._parse_checksum(cs_bytes)
+            if calc != got:
+                status.add_error("E107", "Checksum mismatch in DATA frame")
+                return "", status, b""
+
+            resp_str = data_bytes.decode("cp1251", errors="ignore")
+            return resp_str, status, b""
+
+        status.add_error("E101", "Unknown response type")
+        return "", status, b""
+
+    # ---------------------- Реализация на _isl_request ----------------------
+
+    def _isl_request(self, command: int, data: str = "") -> Tuple[str, DeviceStatus, bytes]:
+        """
+        Ниско ниво ISL заявка за Tremol, реализирана върху Tremol master/slave фрейминг.
+
+        - Сглобява STX/LEN/NBL/CMD/DATA/CS/ETX;
+        - Изпраща през self._connection;
+        - Парсира ACK/DATA отговор и връща DeviceStatus + payload.
+        """
+        with self._device_lock:
+            try:
+                msg = self._build_message(command, data)
+                _logger.debug("Tremol ISL: send cmd 0x%02X data=%s", command, data)
+                raw_resp = self._send_message_raw(msg)
+            except Exception as e:  # noqa: BLE001
+                _logger.exception("Tremol ISL: communication error for cmd=0x%02X", command)
+                status = DeviceStatus()
+                status.add_error("E101", str(e))
+                return "", status, b""
+
+            resp_str, status, status_bytes = self._parse_response_frame(raw_resp)
+            return resp_str, status, status_bytes
+
+    # ---------------------- Tax groups / payments ----------------------
+
+    def get_tax_group_text(self, tax_group: TaxGroup) -> str:
+        """
+        Tremol VAT класове A..H – мапваме от TaxGroup1..8.
+        """
+        mapping = {
+            TaxGroup.TaxGroup1: "A",
+            TaxGroup.TaxGroup2: "B",
+            TaxGroup.TaxGroup3: "C",
+            TaxGroup.TaxGroup4: "D",
+            TaxGroup.TaxGroup5: "E",
+            TaxGroup.TaxGroup6: "F",
+            TaxGroup.TaxGroup7: "G",
+            TaxGroup.TaxGroup8: "H",
+        }
+        if tax_group not in mapping:
+            raise ValueError(f"Unsupported tax group for Tremol ISL: {tax_group}")
+        return mapping[tax_group]
+
+    def get_payment_type_mappings(self) -> Dict[IslPaymentType, str]:
+        """
+        Типичен Tremol mapping за ISL‑стил плащания:
+
+        - Cash  -> "P"
+        - Card  -> "C"
+        - Check -> "N"
+        - Reserved1 -> "D"
+        """
+        return {
+            IslPaymentType.CASH: "P",
+            IslPaymentType.CARD: "C",
+            IslPaymentType.CHECK: "N",
+            IslPaymentType.RESERVED1: "D",
+        }
+
+    # ---------------------- POS → ISL действия (през базовите POS helper-и) ----------------------
 
     def _action_pos_print_receipt(self, data: dict):
         pos_receipt = data.get("data") or data.get("receipt") or {}
@@ -593,249 +787,3 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
             if getattr(iot_devices[d], "device_type", None) == "fiscal_printer"
         ]
         return devices[0] if devices else None
-
-    # ---------------------- Ниско ниво ISL ----------------------
-
-    def _isl_request(self, command: int, data: str = "") -> tuple[str, DeviceStatus, bytes]:
-        """
-        Ниско ниво ISL заявка за Tremol.
-
-        TODO:
-          - изграждане на Tremol frame за `command` и `data`
-            (STX/LEN/NBL/CMD/DATA/CS/ETX);
-          - изпращане през self._connection;
-          - четене на отговор, парсване на ASCII payload и статус байтове (ако има);
-          - конвертиране на статусите към DeviceStatus.
-
-        В момента е placeholder.
-        """
-        raise NotImplementedError("Имплементирай Tremol ISL протокола тук")
-
-    # ---------------------- Tax groups / payments ----------------------
-
-    def get_tax_group_text(self, tax_group: TaxGroup) -> str:
-        """
-        Tremol VAT класове A..H – мапваме от TaxGroup1..8.
-        """
-        mapping = {
-            TaxGroup.TaxGroup1: "A",
-            TaxGroup.TaxGroup2: "B",
-            TaxGroup.TaxGroup3: "C",
-            TaxGroup.TaxGroup4: "D",
-            TaxGroup.TaxGroup5: "E",
-            TaxGroup.TaxGroup6: "F",
-            TaxGroup.TaxGroup7: "G",
-            TaxGroup.TaxGroup8: "H",
-        }
-        if tax_group not in mapping:
-            raise ValueError(f"Unsupported tax group for Tremol ISL: {tax_group}")
-        return mapping[tax_group]
-
-    def get_payment_type_mappings(self) -> Dict[IslPaymentType, str]:
-        """
-        Типичен Tremol mapping за ISL‑стил плащания:
-
-        - Cash  -> "P"
-        - Card  -> "C"
-        - Check -> "N"
-        - Reserved1 -> "D"
-        """
-        return {
-            IslPaymentType.CASH: "P",
-            IslPaymentType.CARD: "C",
-            IslPaymentType.CHECK: "N",
-            IslPaymentType.RESERVED1: "D",
-        }
-
-
-# ====================== Datecs ISL драйвер върху базовия ISL ======================
-
-DatecsIslProtocol = SerialProtocol(
-    name='Datecs ISL',
-    baudrate=115200,
-    bytesize=serial.EIGHTBITS,
-    stopbits=serial.STOPBITS_ONE,
-    parity=serial.PARITY_NONE,
-    timeout=1,
-    writeTimeout=1,
-    measureRegexp=None,
-    statusRegexp=None,
-    commandTerminator=b'',
-    commandDelay=0.2,
-    measureDelay=0.5,
-    newMeasureDelay=0.2,
-    measureCommand=b'',
-    emptyAnswerValid=False,
-)
-
-
-class DatecsIslFiscalPrinterDriver(IslFiscalPrinterBase):
-    """
-    ISL-базиран IoT драйвер за Datecs фискални принтери.
-
-    - Наследява общия IslFiscalPrinterBase (команди, high-level API);
-    - Реализира Datecs-специфично:
-        * кадриране/комуникация (_isl_request),
-        * tax group / payment mappings,
-        * при нужда override на open_receipt/open_reversal_receipt и др.
-    """
-
-    _protocol = DatecsIslProtocol
-    device_type = "fiscal_printer"
-
-    SERIAL_NUMBER_PREFIXES = ("DT", "DC", "DP")
-
-    def __init__(self, identifier, device):
-        super().__init__(identifier, device)
-        self.info = IslDeviceInfo(
-            manufacturer="Datecs",
-            model="Datecs ISL",
-            comment_text_max_length=40,
-            item_text_max_length=40,
-            operator_password_max_length=8,
-        )
-        # Datecs default options – коригирай според реалните изисквания при нужда
-        self.options.update(
-            {
-                "Operator.ID": "1",
-                "Operator.Password": "0000",
-                "Administrator.ID": "20",
-                "Administrator.Password": "9999",
-            }
-        )
-        # POS → ISL действия по стандартния IoT канал
-        self._actions.update({
-            "pos_print_receipt": self._action_pos_print_receipt,
-            "pos_print_reversal_receipt": self._action_pos_print_reversal_receipt,
-            "pos_deposit_money": self._action_pos_deposit_money,
-            "pos_withdraw_money": self._action_pos_withdraw_money,
-            "pos_x_report": self._action_pos_x_report,
-            "pos_z_report": self._action_pos_z_report,
-            "pos_print_duplicate": self._action_pos_print_duplicate,
-        })
-
-    # ---------------------- IoT POS actions → базовите POS helper-и ----------------------
-
-    def _action_pos_print_receipt(self, data: dict):
-        pos_receipt = data.get("data") or data.get("receipt") or {}
-        info, status = self.pos_print_receipt(pos_receipt)
-        return {
-            "ok": status.ok,
-            "info": info,
-            "messages": [m.text for m in (status.messages + status.errors)],
-        }
-
-    def _action_pos_print_reversal_receipt(self, data: dict):
-        pos_receipt = data.get("data") or data.get("receipt") or {}
-        info, status = self.pos_print_reversal_receipt(pos_receipt)
-        return {
-            "ok": status.ok,
-            "info": info,
-            "messages": [m.text for m in (status.messages + status.errors)],
-        }
-
-    def _action_pos_deposit_money(self, data: dict):
-        status = self.pos_deposit_money(data.get("data") or data)
-        return {
-            "ok": status.ok,
-            "messages": [m.text for m in (status.messages + status.errors)],
-        }
-
-    def _action_pos_withdraw_money(self, data: dict):
-        status = self.pos_withdraw_money(data.get("data") or data)
-        return {
-            "ok": status.ok,
-            "messages": [m.text for m in (status.messages + status.errors)],
-        }
-
-    def _action_pos_x_report(self, data: dict):
-        status = self.pos_x_report(data.get("data") or data)
-        return {
-            "ok": status.ok,
-            "messages": [m.text for m in (status.messages + status.errors)],
-        }
-
-    def _action_pos_z_report(self, data: dict):
-        status = self.pos_z_report(data.get("data") or data)
-        return {
-            "ok": status.ok,
-            "messages": [m.text for m in (status.messages + status.errors)],
-        }
-
-    def _action_pos_print_duplicate(self, data: dict):
-        status = self.pos_print_duplicate(data.get("data") or data)
-        return {
-            "ok": status.ok,
-            "messages": [m.text for m in (status.messages + status.errors)],
-        }
-
-    # ---------------------- Поддръжка / избор на устройство ----------------------
-
-    @classmethod
-    def supported(cls, device):
-        """
-        Тук можеш да добавиш Datecs-специфичен probe (USB VID/PID, serial description и т.н.).
-        Засега връща True, за да може драйверът да се тества.
-        """
-        return True
-
-    @classmethod
-    def get_default_device(cls):
-        devices = [
-            iot_devices[d]
-            for d in iot_devices
-            if getattr(iot_devices[d], "device_type", None) == "fiscal_printer"
-        ]
-        return devices[0] if devices else None
-
-    # ---------------------- Ниско ниво ISL ----------------------
-
-    def _isl_request(self, command: int, data: str = "") -> tuple[str, DeviceStatus, bytes]:
-        """
-        Ниско ниво ISL заявка за Datecs.
-
-        TODO:
-          - изграждане на ISL frame според Datecs документацията (STX/LEN/CMD/DATA/BCC/ETX);
-          - изпращане през self._connection;
-          - четене на отговор, разделяне на ASCII payload и статус байтове;
-          - парсване на статусите към DeviceStatus.
-
-        Засега е placeholder, за да може структурата да е готова.
-        """
-        raise NotImplementedError("Имплементирай Datecs ISL протокола тук")
-
-    # ---------------------- Tax groups / payments ----------------------
-
-    def get_tax_group_text(self, tax_group: TaxGroup) -> str:
-        """
-        Datecs обикновено използва данъчни групи A..H – мапваме от TaxGroup1..8.
-        """
-        mapping = {
-            TaxGroup.TaxGroup1: "A",
-            TaxGroup.TaxGroup2: "B",
-            TaxGroup.TaxGroup3: "C",
-            TaxGroup.TaxGroup4: "D",
-            TaxGroup.TaxGroup5: "E",
-            TaxGroup.TaxGroup6: "F",
-            TaxGroup.TaxGroup7: "G",
-            TaxGroup.TaxGroup8: "H",
-        }
-        if tax_group not in mapping:
-            raise ValueError(f"Unsupported tax group for Datecs ISL: {tax_group}")
-        return mapping[tax_group]
-
-    def get_payment_type_mappings(self) -> Dict[IslPaymentType, str]:
-        """
-        Примерен mapping – нагласи го спрямо реалната Datecs документация при нужда:
-
-         - Cash  -> "P"
-         - Card  -> "C"
-         - Check -> "N"
-         - Reserved1 -> "D"
-        """
-        return {
-            IslPaymentType.CASH: "P",
-            IslPaymentType.CARD: "C",
-            IslPaymentType.CHECK: "N",
-            IslPaymentType.RESERVED1: "D",
-        }
