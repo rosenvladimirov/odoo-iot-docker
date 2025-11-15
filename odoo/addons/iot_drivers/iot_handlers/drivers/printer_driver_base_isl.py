@@ -837,6 +837,184 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         info = self._netfp_build_receipt_info(close_resp, total_amount_dec or None)
         return info, st
 
+    # ---------------------- POS → Net.FP wrapper (стандартен IoT канал) ----------------------
+
+    def _pos_extract_lines(self, pos_receipt: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Извлича item редове от POS JSON (различни възможни форми) и ги нормализира
+        до списък от dict-ове.
+        """
+        lines = pos_receipt.get("lines") or pos_receipt.get("items") or []
+        norm: List[Dict[str, Any]] = []
+
+        for line in lines:
+            line_dict: Dict[str, Any] = {}
+
+            if isinstance(line, dict):
+                line_dict = line
+            elif isinstance(line, (list, tuple)):
+                # POS често праща [id, data] или [data]
+                if len(line) >= 2 and isinstance(line[1], dict):
+                    line_dict = line[1]
+                elif len(line) >= 1 and isinstance(line[0], dict):
+                    line_dict = line[0]
+                else:
+                    continue
+            else:
+                continue
+
+            norm.append(line_dict)
+
+        return norm
+
+    def _pos_extract_payments(self, pos_receipt: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Извлича payments от POS JSON и ги нормализира до:
+          { amount, paymentType }
+        """
+        payments = pos_receipt.get("payments") or pos_receipt.get("paymentLines") or []
+        norm: List[Dict[str, Any]] = []
+
+        for p in payments:
+            if not isinstance(p, dict):
+                continue
+
+            amount = p.get("amount") or p.get("paid") or p.get("total") or 0
+            # опит за име на payment type
+            pt = (
+                p.get("paymentType")
+                or p.get("payment_type")
+                or p.get("method_type")
+                or p.get("method")
+                or "cash"
+            )
+            norm.append(
+                {
+                    "amount": amount,
+                    "paymentType": pt,
+                }
+            )
+
+        return norm
+
+    def _pos_to_netfp_receipt(self, pos_receipt: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Преобразува стандартния POS JSON бон (какъвто идва по IoT/hw_proxy канала)
+        към Net.FP Receipt JSON формат, който netfp_print_receipt очаква.
+
+        Това е „рендер“/адаптер слой – опитва се да покрие най-често срещаните
+        POS структури, без да изисква one-to-one мапинг.
+        """
+        from decimal import Decimal as D
+
+        # Unique Sale Number / идентификатор на бона
+        unique_sale_number = (
+            pos_receipt.get("unique_sale_number")
+            or pos_receipt.get("uniqueSaleNumber")
+            or pos_receipt.get("uid")
+            or pos_receipt.get("name")
+            or ""
+        )
+
+        # Оператор – ако POS не дава, използваме default от options
+        operator_id = pos_receipt.get("operator") or ""
+        operator_password = pos_receipt.get("operatorPassword") or ""
+
+        # Коментари – заглавие/бележка/футър
+        comments = []
+        for key in ("note", "header", "footer", "comment"):
+            txt = pos_receipt.get(key)
+            if txt:
+                comments.append({"text": str(txt)})
+
+        # Артикули
+        items: List[Dict[str, Any]] = []
+        for line_dict in self._pos_extract_lines(pos_receipt):
+            name = (
+                line_dict.get("product_name")
+                or line_dict.get("productName")
+                or line_dict.get("name")
+                or line_dict.get("description")
+                or ""
+            )
+
+            unit_price = (
+                line_dict.get("price_unit")
+                or line_dict.get("priceUnit")
+                or line_dict.get("unit_price")
+                or line_dict.get("price")
+                or 0
+            )
+            qty = (
+                line_dict.get("qty")
+                or line_dict.get("quantity")
+                or 1
+            )
+
+            discount = line_dict.get("discount") or line_dict.get("discountPercent") or 0
+
+            # Tax group – ако POS подава index или име
+            tax_group = (
+                line_dict.get("taxGroup")
+                or line_dict.get("tax_group")
+                or line_dict.get("tax_group_index")
+            )
+
+            item: Dict[str, Any] = {
+                "text": str(name),
+                "unitPrice": D(str(unit_price)),
+                "quantity": D(str(qty)),
+            }
+            if tax_group is not None:
+                item["taxGroup"] = tax_group
+            if discount:
+                item["discountPercent"] = D(str(discount))
+
+            items.append(item)
+
+        # Плащания
+        payments = self._pos_extract_payments(pos_receipt)
+
+        # Обща сума, ако POS я предоставя
+        total = (
+            pos_receipt.get("total_with_tax")
+            or pos_receipt.get("totalWithTax")
+            or pos_receipt.get("total")
+            or pos_receipt.get("amount_total")
+        )
+
+        netfp_receipt: Dict[str, Any] = {
+            "uniqueSaleNumber": unique_sale_number,
+            "operator": operator_id,
+            "operatorPassword": operator_password,
+            "comments": comments,
+            "items": items,
+            "payments": payments,
+        }
+        if total is not None:
+            netfp_receipt["totalAmount"] = total
+
+        return netfp_receipt
+
+    def pos_print_receipt(self, pos_receipt: Dict[str, Any]) -> Tuple[Dict[str, Any], DeviceStatus]:
+        """
+        Врапер за „стандартния“ POS / IoT JSON бон:
+
+        1) получава POS receipt по hw_proxy / IoT канал;
+        2) конвертира го към Net.FP Receipt формат чрез _pos_to_netfp_receipt();
+        3) предава го към netfp_print_receipt(), която стъпва върху ISL базата.
+
+        Така драйверите на приcнерите виждат един унифициран Net.FP-like формат.
+        """
+        try:
+            netfp_receipt = self._pos_to_netfp_receipt(pos_receipt or {})
+        except Exception as e:  # noqa: BLE001
+            status = DeviceStatus()
+            status.add_error("E400", f"Invalid POS receipt format: {e}")
+            return {}, status
+
+        return self.netfp_print_receipt(netfp_receipt)
+
     # ---------------------- Поддръжка / избор на устройство ----------------------
 
     @classmethod
