@@ -16,6 +16,7 @@ idna==2.10
 Jinja2==3.0.3
 libsass==0.20.1
 #lxml==4.9.2
+lxml_html_clean==0.1.1
 MarkupSafe==2.0.1
 num2words==0.5.10
 ofxparse==0.21

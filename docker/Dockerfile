@@ -77,7 +77,7 @@ RUN useradd -m -s /bin/bash iotbox \
 
 # === COPY APPLICATION ===
 WORKDIR /app
-COPY --chown=iotbox:iotbox . /app/
+COPY --chown=iotbox:iotbox ./odoo /app/
 
 # === ENTRYPOINT ===
 COPY docker/entrypoint.sh /entrypoint.sh
