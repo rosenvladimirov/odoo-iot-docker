@@ -25,7 +25,7 @@ from .printer_driver_base_isl import (
 _logger = logging.getLogger(__name__)
 
 
-# ====================== Енумерации и грешки ======================
+# ====================== Енумерации и грешки (Tremol протокол) ======================
 
 class VATClass(Enum):
     VAT_A = "А"
@@ -97,7 +97,7 @@ COMMAND_ERROR_CODES = {
 }
 
 
-# ====================== Serial протокол ======================
+# ====================== Tremol BG Serial протокол ======================
 
 TremolBGProtocol = SerialProtocol(
     name='Tremol BG Fiscal Printer',
@@ -118,7 +118,7 @@ TremolBGProtocol = SerialProtocol(
 )
 
 
-# ====================== IoT драйвер + протокол ======================
+# ====================== Tremol native драйвер (не ISL) ======================
 
 class TremolFiscalPrinterDriver(SerialDriver):
     """
@@ -233,7 +233,7 @@ class TremolFiscalPrinterDriver(SerialDriver):
             # nbl = response[2]
             # cmd = response[3]
             if length > 4:
-                data = response[4 : 4 + length - 3].decode('cp1251')
+                data = response[4: 4 + length - 3].decode('cp1251')
                 return "DATA", data
             return "DATA", ""
 
@@ -512,6 +512,87 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
                 "Operator.Password": "000000",
             }
         )
+        # POS → ISL действия по стандартния IoT канал
+        self._actions.update({
+            "pos_print_receipt": self._action_pos_print_receipt,
+            "pos_print_reversal_receipt": self._action_pos_print_reversal_receipt,
+            "pos_deposit_money": self._action_pos_deposit_money,
+            "pos_withdraw_money": self._action_pos_withdraw_money,
+            "pos_x_report": self._action_pos_x_report,
+            "pos_z_report": self._action_pos_z_report,
+            "pos_print_duplicate": self._action_pos_print_duplicate,
+        })
+
+    # ---------------------- IoT POS actions → базовите POS helper-и ----------------------
+
+    def _action_pos_print_receipt(self, data: dict):
+        pos_receipt = data.get("data") or data.get("receipt") or {}
+        info, status = self.pos_print_receipt(pos_receipt)
+        return {
+            "ok": status.ok,
+            "info": info,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_print_reversal_receipt(self, data: dict):
+        pos_receipt = data.get("data") or data.get("receipt") or {}
+        info, status = self.pos_print_reversal_receipt(pos_receipt)
+        return {
+            "ok": status.ok,
+            "info": info,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_deposit_money(self, data: dict):
+        status = self.pos_deposit_money(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_withdraw_money(self, data: dict):
+        status = self.pos_withdraw_money(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_x_report(self, data: dict):
+        status = self.pos_x_report(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_z_report(self, data: dict):
+        status = self.pos_z_report(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_print_duplicate(self, data: dict):
+        status = self.pos_print_duplicate(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    # ---------------------- Поддръжка / избор на устройство ----------------------
+
+    @classmethod
+    def supported(cls, device):
+        """По желание – реален probe за Tremol ISL. Засега True."""
+        return True
+
+    @classmethod
+    def get_default_device(cls):
+        devices = [
+            iot_devices[d]
+            for d in iot_devices
+            if getattr(iot_devices[d], "device_type", None) == "fiscal_printer"
+        ]
+        return devices[0] if devices else None
 
     # ---------------------- Ниско ниво ISL ----------------------
 
@@ -558,6 +639,199 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
         - Card  -> "C"
         - Check -> "N"
         - Reserved1 -> "D"
+        """
+        return {
+            IslPaymentType.CASH: "P",
+            IslPaymentType.CARD: "C",
+            IslPaymentType.CHECK: "N",
+            IslPaymentType.RESERVED1: "D",
+        }
+
+
+# ====================== Datecs ISL драйвер върху базовия ISL ======================
+
+DatecsIslProtocol = SerialProtocol(
+    name='Datecs ISL',
+    baudrate=115200,
+    bytesize=serial.EIGHTBITS,
+    stopbits=serial.STOPBITS_ONE,
+    parity=serial.PARITY_NONE,
+    timeout=1,
+    writeTimeout=1,
+    measureRegexp=None,
+    statusRegexp=None,
+    commandTerminator=b'',
+    commandDelay=0.2,
+    measureDelay=0.5,
+    newMeasureDelay=0.2,
+    measureCommand=b'',
+    emptyAnswerValid=False,
+)
+
+
+class DatecsIslFiscalPrinterDriver(IslFiscalPrinterBase):
+    """
+    ISL-базиран IoT драйвер за Datecs фискални принтери.
+
+    - Наследява общия IslFiscalPrinterBase (команди, high-level API);
+    - Реализира Datecs-специфично:
+        * кадриране/комуникация (_isl_request),
+        * tax group / payment mappings,
+        * при нужда override на open_receipt/open_reversal_receipt и др.
+    """
+
+    _protocol = DatecsIslProtocol
+    device_type = "fiscal_printer"
+
+    SERIAL_NUMBER_PREFIXES = ("DT", "DC", "DP")
+
+    def __init__(self, identifier, device):
+        super().__init__(identifier, device)
+        self.info = IslDeviceInfo(
+            manufacturer="Datecs",
+            model="Datecs ISL",
+            comment_text_max_length=40,
+            item_text_max_length=40,
+            operator_password_max_length=8,
+        )
+        # Datecs default options – коригирай според реалните изисквания при нужда
+        self.options.update(
+            {
+                "Operator.ID": "1",
+                "Operator.Password": "0000",
+                "Administrator.ID": "20",
+                "Administrator.Password": "9999",
+            }
+        )
+        # POS → ISL действия по стандартния IoT канал
+        self._actions.update({
+            "pos_print_receipt": self._action_pos_print_receipt,
+            "pos_print_reversal_receipt": self._action_pos_print_reversal_receipt,
+            "pos_deposit_money": self._action_pos_deposit_money,
+            "pos_withdraw_money": self._action_pos_withdraw_money,
+            "pos_x_report": self._action_pos_x_report,
+            "pos_z_report": self._action_pos_z_report,
+            "pos_print_duplicate": self._action_pos_print_duplicate,
+        })
+
+    # ---------------------- IoT POS actions → базовите POS helper-и ----------------------
+
+    def _action_pos_print_receipt(self, data: dict):
+        pos_receipt = data.get("data") or data.get("receipt") or {}
+        info, status = self.pos_print_receipt(pos_receipt)
+        return {
+            "ok": status.ok,
+            "info": info,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_print_reversal_receipt(self, data: dict):
+        pos_receipt = data.get("data") or data.get("receipt") or {}
+        info, status = self.pos_print_reversal_receipt(pos_receipt)
+        return {
+            "ok": status.ok,
+            "info": info,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_deposit_money(self, data: dict):
+        status = self.pos_deposit_money(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_withdraw_money(self, data: dict):
+        status = self.pos_withdraw_money(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_x_report(self, data: dict):
+        status = self.pos_x_report(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_z_report(self, data: dict):
+        status = self.pos_z_report(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_print_duplicate(self, data: dict):
+        status = self.pos_print_duplicate(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    # ---------------------- Поддръжка / избор на устройство ----------------------
+
+    @classmethod
+    def supported(cls, device):
+        """
+        Тук можеш да добавиш Datecs-специфичен probe (USB VID/PID, serial description и т.н.).
+        Засега връща True, за да може драйверът да се тества.
+        """
+        return True
+
+    @classmethod
+    def get_default_device(cls):
+        devices = [
+            iot_devices[d]
+            for d in iot_devices
+            if getattr(iot_devices[d], "device_type", None) == "fiscal_printer"
+        ]
+        return devices[0] if devices else None
+
+    # ---------------------- Ниско ниво ISL ----------------------
+
+    def _isl_request(self, command: int, data: str = "") -> tuple[str, DeviceStatus, bytes]:
+        """
+        Ниско ниво ISL заявка за Datecs.
+
+        TODO:
+          - изграждане на ISL frame според Datecs документацията (STX/LEN/CMD/DATA/BCC/ETX);
+          - изпращане през self._connection;
+          - четене на отговор, разделяне на ASCII payload и статус байтове;
+          - парсване на статусите към DeviceStatus.
+
+        Засега е placeholder, за да може структурата да е готова.
+        """
+        raise NotImplementedError("Имплементирай Datecs ISL протокола тук")
+
+    # ---------------------- Tax groups / payments ----------------------
+
+    def get_tax_group_text(self, tax_group: TaxGroup) -> str:
+        """
+        Datecs обикновено използва данъчни групи A..H – мапваме от TaxGroup1..8.
+        """
+        mapping = {
+            TaxGroup.TaxGroup1: "A",
+            TaxGroup.TaxGroup2: "B",
+            TaxGroup.TaxGroup3: "C",
+            TaxGroup.TaxGroup4: "D",
+            TaxGroup.TaxGroup5: "E",
+            TaxGroup.TaxGroup6: "F",
+            TaxGroup.TaxGroup7: "G",
+            TaxGroup.TaxGroup8: "H",
+        }
+        if tax_group not in mapping:
+            raise ValueError(f"Unsupported tax group for Datecs ISL: {tax_group}")
+        return mapping[tax_group]
+
+    def get_payment_type_mappings(self) -> Dict[IslPaymentType, str]:
+        """
+        Примерен mapping – нагласи го спрямо реалната Datecs документация при нужда:
+
+         - Cash  -> "P"
+         - Card  -> "C"
+         - Check -> "N"
+         - Reserved1 -> "D"
         """
         return {
             IslPaymentType.CASH: "P",

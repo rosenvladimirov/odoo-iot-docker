@@ -1015,6 +1015,92 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
 
         return self.netfp_print_receipt(netfp_receipt)
 
+    def pos_print_reversal_receipt(self, pos_receipt: Dict[str, Any]) -> Tuple[Dict[str, Any], DeviceStatus]:
+        """
+        POS → ISL сторно бон.
+
+        Очаква POS JSON за сторно (вече в Net.FP-подобен формат):
+          reason, receiptNumber, receiptDateTime, fiscalMemorySerialNumber,
+          uniqueSaleNumber, operator, operatorPassword, items[], payments[].
+
+        Ако POS форматът се различава, може да се добави отделен
+        адаптер (подобно на _pos_to_netfp_receipt()).
+        """
+        try:
+            # засега приемаме, че POS подава данните вече в Net.FP форма;
+            # при нужда тук може да се добави отделен конвертор.
+            netfp_reversal = dict(pos_receipt or {})
+        except Exception as e:  # noqa: BLE001
+            status = DeviceStatus()
+            status.add_error("E400", f"Invalid POS reversal receipt format: {e}")
+            return {}, status
+
+        return self.netfp_print_reversal_receipt(netfp_reversal)
+
+    def pos_deposit_money(self, payload: Dict[str, Any]) -> DeviceStatus:
+        """
+        POS → внасяне на сума в касата.
+
+        payload: { "amount": 12.34, ... }
+
+        По подразбиране използваме MoneyTransfer с ПОЛОЖИТЕЛНА сума за внасяне.
+        Конкретен драйвер може да override-не поведението при нужда.
+        """
+        from decimal import Decimal as D
+
+        status = DeviceStatus()
+        try:
+            amount = D(str(payload.get("amount", "0")))
+        except Exception as e:  # noqa: BLE001
+            status.add_error("E400", f"Invalid deposit amount: {e}")
+            return status
+
+        _resp, st = self.money_transfer(amount)
+        return st
+
+    def pos_withdraw_money(self, payload: Dict[str, Any]) -> DeviceStatus:
+        """
+        POS → изваждане на сума от касата.
+
+        payload: { "amount": 12.34, ... }
+
+        По подразбиране използваме MoneyTransfer с ОТРИЦАТЕЛНА сума за теглене.
+        Ако конкретният протокол има отделна команда за withdraw, драйверът
+        може да override-не на по-високо ниво.
+        """
+        from decimal import Decimal as D
+
+        status = DeviceStatus()
+        try:
+            amount = D(str(payload.get("amount", "0")))
+        except Exception as e:  # noqa: BLE001
+            status.add_error("E400", f"Invalid withdraw amount: {e}")
+            return status
+
+        _resp, st = self.money_transfer(-amount)
+        return st
+
+    def pos_x_report(self, payload: Dict[str, Any]) -> DeviceStatus:
+        """
+        POS → X отчет (без нулиране).
+        """
+        _resp, status = self.print_daily_report(zeroing=False)
+        return status
+
+    def pos_z_report(self, payload: Dict[str, Any]) -> DeviceStatus:
+        """
+        POS → Z отчет (с нулиране).
+        """
+        _resp, status = self.print_daily_report(zeroing=True)
+        return status
+
+    def pos_print_duplicate(self, payload: Dict[str, Any]) -> DeviceStatus:
+        """
+        POS → дубликат на последния бон.
+        """
+        _resp, status = self.print_last_receipt_duplicate()
+        return status
+
     # ---------------------- Поддръжка / избор на устройство ----------------------
 
     @classmethod

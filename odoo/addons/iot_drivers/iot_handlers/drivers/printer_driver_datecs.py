@@ -1,13 +1,29 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
-import logging
-import serial
-import time
-from enum import Enum
-from typing import Optional, Dict, Any
+"""
+Datecs ISL Fiscal Printer Driver
 
+Базира се на ISL фреймингa от BgIslFiscalPrinter (MarkerPreamble/Space/Postamble/Separator/Terminator)
+и използва високонитовото API от IslFiscalPrinterBase (open_receipt, add_item, add_payment, ...).
+
+Поддържаните POS/IoT действия минават през общите POS/NetFP „рецепти“
+от базовия ISL драйвер:
+  - pos_print_receipt
+  - pos_print_reversal_receipt
+  - pos_deposit_money
+  - pos_withdraw_money
+  - pos_x_report
+  - pos_z_report
+  - pos_print_duplicate
+"""
+
+import logging
+import time
+from threading import Lock
+from typing import Optional, Dict, Any, Tuple
+
+import serial
 from odoo.addons.iot_drivers.iot_handlers.drivers.serial_base_driver import (
-    SerialDriver,
     SerialProtocol,
 )
 from odoo.addons.iot_drivers.main import iot_devices
@@ -15,8 +31,6 @@ from .printer_driver_base_isl import (
     IslFiscalPrinterBase,
     IslDeviceInfo,
     DeviceStatus,
-    StatusMessage,
-    StatusMessageType,
     TaxGroup,
     PriceModifierType,
     PaymentType as IslPaymentType,
@@ -25,539 +39,320 @@ from .printer_driver_base_isl import (
 _logger = logging.getLogger(__name__)
 
 
-# ====================== Енумерации и грешки ======================
-
-class VATClass(Enum):
-    VAT_A = "А"
-    VAT_B = "Б"
-    VAT_C = "В"
-    VAT_D = "Г"
-    VAT_E = "Д"
-    VAT_F = "Е"
-    VAT_G = "Ж"
-    VAT_H = "З"
-    FORBIDDEN = "*"
-
-
-class PaymentType(Enum):
-    CASH = "0"
-    PAYMENT_1 = "1"
-    PAYMENT_2 = "2"
-    PAYMENT_3 = "3"
-    PAYMENT_4 = "4"
-    PAYMENT_5 = "5"
-    PAYMENT_6 = "6"
-    PAYMENT_7 = "7"
-    PAYMENT_8 = "8"
-    PAYMENT_9 = "9"
-    PAYMENT_10 = "10"
-    CURRENCY = "11"
-
-
-class FiscalPrinterError(Exception):
-    """Грешка от фискалния принтер Tremol."""
-
-    def __init__(self, error_code: str, message: str):
-        self.error_code = error_code
-        self.message = message
-        super().__init__(f"Error {error_code}: {message}")
-
-
-# ====================== Таблици с грешки ======================
-
-ERROR_CODES = {
-    "30": "OK",
-    "31": "Out of paper, printer failure",
-    "32": "Registers overflow",
-    "33": "Clock failure or incorrect date&time",
-    "34": "Opened fiscal receipt",
-    "35": "Payment residue account",
-    "36": "Opened non-fiscal receipt",
-    "37": "Registered payment but receipt is not closed",
-    "38": "Fiscal memory failure",
-    "39": "Incorrect password",
-    "3a": "Missing external display",
-    "3b": "24hours block – unprinted Z report",
-    "3c": "Overheated printer thermal head",
-    "3d": "Interrupt power supply in fiscal receipt",
-    "3e": "Overflow EJ",
-    "3f": "Insufficient conditions",
-}
-
-COMMAND_ERROR_CODES = {
-    "30": "OK",
-    "31": "Invalid command",
-    "32": "Illegal command",
-    "33": "Z daily report is not zero",
-    "34": "Syntax error",
-    "35": "Input registers overflow",
-    "36": "Zero input registers",
-    "37": "Unavailable transaction for correction",
-    "38": "Insufficient amount on hand",
-}
-
-
-# ====================== Serial протокол ======================
-
-TremolBGProtocol = SerialProtocol(
-    name='Tremol BG Fiscal Printer',
-    baudrate=115200,
-    bytesize=serial.EIGHTBITS,
-    stopbits=serial.STOPBITS_ONE,
-    parity=serial.PARITY_NONE,
-    timeout=5,
-    writeTimeout=1,
-    measureRegexp=None,
-    statusRegexp=None,
-    commandTerminator=b'',
-    commandDelay=0.1,
-    measureDelay=0.1,
-    newMeasureDelay=0.2,
-    measureCommand=b'',
-    emptyAnswerValid=False,
-)
-
-
-# ====================== IoT драйвер + протокол ======================
-
-class TremolFiscalPrinterDriver(SerialDriver):
+class DatecsIslFiscalPrinterDriver(IslFiscalPrinterBase):
     """
-    IoT драйвер за български фискален принтер Tremol.
+    ISL-базиран IoT драйвер за Datecs фискални принтери (DP-25, WP-500X, FP-700X и др.).
 
-    - наследява SerialDriver (като TremolG03 драйвера за Кения),
-    - вътре реализира протокола (STX/LEN/NBL/CMD/DATA/CS/ETX),
-    - предоставя high‑level API: open_receipt, sell_item, subtotal, payment, close...
+    - Наследява IslFiscalPrinterBase → използва общите команди и POS/NetFP рецепти;
+    - Тук са само:
+        * ISL фреймингът за Datecs (BuildHostFrame/RawRequest аналог),
+        * Datecs payment mappings,
+        * регистрация на POS действията към pos_* helper-ите от базата.
     """
 
-    _protocol = TremolBGProtocol
-
-    def __init__(self, identifier, device):
-        super().__init__(identifier, device)
-        self.device_type = 'fiscal_printer'
-        self.message_counter = 0x20  # NBL започва от 0x20
-
-    # ---------------------- Поддръжка и избор на устройство ----------------------
-
-    @classmethod
-    def supported(cls, device):
-        """По желание тук може да се направи реално „probe“. Засега връщаме True."""
-        return True
-
-    @classmethod
-    def get_default_device(cls):
-        devices = [
-            iot_devices[d]
-            for d in iot_devices
-            if getattr(iot_devices[d], 'device_type', None) == 'fiscal_printer'
-        ]
-        return devices[0] if devices else None
-
-    # ---------------------- Ниско ниво протокол ----------------------
-
-    def _calculate_checksum(self, data: bytes) -> bytes:
-        """XOR checksum, конвертиран в 2 ASCII байта (с +0x30 на nibble)."""
-        checksum = 0
-        for b in data:
-            checksum ^= b
-
-        high = ((checksum >> 4) & 0x0F) + 0x30
-        low = (checksum & 0x0F) + 0x30
-        return bytes([high, low])
-
-    def _build_message(self, command: int, data: str = "") -> bytes:
-        """
-        Сглобява пълно съобщение:
-        STX(0x02) LEN NBL CMD DATA CS1 CS2 ETX(0x0A)
-        """
-        data_bytes = data.encode('cp1251')
-
-        length = 3 + len(data_bytes)             # LEN + NBL + CMD + DATA
-        len_byte = length + 0x20                 # според протокола
-
-        nbl = self.message_counter
-        self.message_counter += 1
-        if self.message_counter > 0x9F:
-            self.message_counter = 0x20
-
-        core = bytes([len_byte, nbl, command]) + data_bytes
-
-        checksum = self._calculate_checksum(core)
-        msg = b'\x02' + core + checksum + b'\x0A'
-        return msg
-
-    def _send_message(self, message: bytes) -> bytes:
-        """Изпраща съобщението и получава отговор от self._connection."""
-        if not self._connection or not self._connection.is_open:
-            raise FiscalPrinterError("CONNECTION", "Not connected to printer")
-
-        try:
-            self._connection.write(message)
-            self._connection.flush()
-            # протоколът позволява до 1024 байта; тук четем с timeout от SerialProtocol
-            response = self._connection.read(1024)
-            return response
-        except Exception as e:  # noqa: BLE001
-            _logger.error("Tremol: communication error: %s", e)
-            raise FiscalPrinterError("COMMUNICATION", f"Communication failed: {e}") from e
-
-    def _parse_response(self, response: bytes) -> tuple[str, Optional[str]]:
-        """
-        Парсва отговор от фискалното устройство.
-        Връща (тип, данни) където тип е "ACK" или "DATA".
-        """
-        if len(response) < 7:
-            raise FiscalPrinterError("PROTOCOL", "Invalid response length")
-
-        first = response[0]
-
-        if first == 0x06:  # ACK
-            status1 = chr(response[2])
-            status2 = chr(response[3])
-            status_code = status1 + status2
-
-            if status_code != "30":
-                err_msg = ERROR_CODES.get(status1 + "0", "Unknown error")
-                cmd_msg = COMMAND_ERROR_CODES.get(status2 + "0", "Unknown command error")
-                raise FiscalPrinterError(status_code, f"{err_msg} / {cmd_msg}")
-
-            return "ACK", None
-
-        if first == 0x15:  # NACK
-            raise FiscalPrinterError("NACK", "Negative acknowledgment")
-
-        if first == 0x0E:  # RETRY
-            raise FiscalPrinterError("RETRY", "Device busy")
-
-        if first == 0x02:  # Data message
-            length = response[1] - 0x20
-            # nbl = response[2]
-            # cmd = response[3]
-            if length > 4:
-                data = response[4 : 4 + length - 3].decode('cp1251')
-                return "DATA", data
-            return "DATA", ""
-
-        raise FiscalPrinterError("PROTOCOL", "Unknown response type")
-
-    def _send_command(self, command: int, data: str = "") -> Optional[str]:
-        """
-        Изпраща команда с автоматичен retry при "RETRY" от устройството.
-        Връща данните от "DATA" отговор или None при чист ACK.
-        """
-        max_retries = 3
-
-        for attempt in range(max_retries):
-            try:
-                msg = self._build_message(command, data)
-                _logger.debug("Tremol: send cmd 0x%02X data=%s", command, data)
-
-                response = self._send_message(msg)
-                resp_type, resp_data = self._parse_response(response)
-
-                if resp_type == "ACK":
-                    return None
-                if resp_type == "DATA":
-                    return resp_data
-
-            except FiscalPrinterError as e:
-                if e.error_code == "RETRY" and attempt < max_retries - 1:
-                    time.sleep(0.1)
-                    continue
-                raise
-
-        raise FiscalPrinterError("RETRY", "Max retries exceeded")
-
-    # ---------------------- Базови операции ----------------------
-
-    def check_status_quick(self) -> bytes:
-        """Бърз статус с unpacked команда 0x04."""
-        if not self._connection or not self._connection.is_open:
-            raise FiscalPrinterError("CONNECTION", "Not connected to printer")
-
-        try:
-            self._connection.write(b'\x04')
-            self._connection.flush()
-            return self._connection.read(1)
-        except Exception as e:  # noqa: BLE001
-            raise FiscalPrinterError("STATUS", f"Status check failed: {e}") from e
-
-    def get_status(self) -> Dict[str, Any]:
-        """Детайлен статус (команда 0x20)."""
-        with self._device_lock:
-            resp = self._send_command(0x20)
-        if resp and len(resp) >= 14:
-            return {
-                'fm_read_only': bool(int(resp[0]) & 0x01),
-                'power_down_in_receipt': bool(int(resp[0]) & 0x02),
-                'printer_not_ready_overheat': bool(int(resp[0]) & 0x04),
-            }
-        return {}
-
-    def get_version(self) -> Dict[str, Any]:
-        """Информация за устройството (команда 0x21)."""
-        with self._device_lock:
-            resp = self._send_command(0x21)
-        if resp:
-            parts = resp.split(';')
-            if len(parts) >= 5:
-                return {
-                    'device_type': parts[0],
-                    'certificate_num': parts[1],
-                    'certificate_date': parts[2],
-                    'model': parts[3],
-                    'version': parts[4],
-                }
-        return {}
-
-    # ---------------------- Фискален бон ----------------------
-
-    def open_receipt(
-        self,
-        operator_num: str = "1",
-        operator_pass: str = "000000",
-        receipt_format: str = "1",
-        print_vat: str = "1",
-        print_type: str = "0",
-        unique_receipt_num: str = "",
-    ) -> None:
-        """Отваря фискален бон (команда 0x30)."""
-        data = f"{operator_num};{operator_pass};{receipt_format};{print_vat};{print_type}"
-        if unique_receipt_num:
-            data += f"${unique_receipt_num}"
-        with self._device_lock:
-            self._send_command(0x30, data)
-
-    def sell_item(
-        self,
-        name: str,
-        vat_class: VATClass,
-        price: float,
-        quantity: Optional[float] = None,
-        discount_percent: Optional[float] = None,
-        discount_value: Optional[float] = None,
-    ) -> None:
-        """Регистрация на продажба (команда 0x31)."""
-        name = name[:36]
-        data = f"{name};{vat_class.value};{price:.2f}"
-
-        if quantity is not None:
-            data += f"*{quantity:.3f}"
-        if discount_percent is not None:
-            data += f",{discount_percent:.2f}"
-        if discount_value is not None:
-            data += f":{discount_value:.2f}"
-
-        with self._device_lock:
-            self._send_command(0x31, data)
-
-    def subtotal(
-        self,
-        print_subtotal: bool = True,
-        display_subtotal: bool = True,
-        discount_value: Optional[float] = None,
-        discount_percent: Optional[float] = None,
-    ) -> float:
-        """Междинна сума (команда 0x33)."""
-        data = f"{'1' if print_subtotal else '0'};{'1' if display_subtotal else '0'}"
-        if discount_value is not None:
-            data += f":{discount_value:.2f}"
-        if discount_percent is not None:
-            data += f",{discount_percent:.2f}"
-
-        with self._device_lock:
-            resp = self._send_command(0x33, data)
-
-        if resp:
-            try:
-                return float(resp)
-            except ValueError:
-                pass
-        return 0.0
-
-    def payment(
-        self,
-        payment_type: PaymentType = PaymentType.CASH,
-        amount: float = 0.0,
-        change_type: str = "0",
-        without_change: bool = False,
-    ) -> None:
-        """Плащане (команда 0x35)."""
-        change_option = "1" if without_change else "0"
-        data = f"{payment_type.value};{change_option};{amount:.2f}"
-        if not without_change:
-            data += f";{change_type}"
-        with self._device_lock:
-            self._send_command(0x35, data)
-
-    def cash_payment_and_close(self) -> None:
-        """Плащане в брой за точната сума и затваряне (0x36)."""
-        with self._device_lock:
-            self._send_command(0x36)
-
-    def close_receipt(self) -> None:
-        """Затваряне на бон (0x38)."""
-        with self._device_lock:
-            self._send_command(0x38)
-
-    def cancel_receipt(self) -> None:
-        """Отказ на бон (0x39)."""
-        with self._device_lock:
-            self._send_command(0x39)
-
-    # ---------------------- Сервизни функции ----------------------
-
-    def print_daily_report(self, with_zeroing: bool = False) -> None:
-        """Дневен X/Z отчет (0x7C)."""
-        option = "Z" if with_zeroing else "X"
-        with self._device_lock:
-            self._send_command(0x7C, option)
-
-    def print_text(self, text: str) -> None:
-        """Свободен текст (0x37)."""
-        with self._device_lock:
-            self._send_command(0x37, text)
-
-    def open_drawer(self) -> None:
-        """Отваряне на чекмедже (0x2A)."""
-        with self._device_lock:
-            self._send_command(0x2A)
-
-    def cut_paper(self) -> None:
-        """Отрязване на хартия (0x29)."""
-        with self._device_lock:
-            self._send_command(0x29)
-
-    def feed_paper(self) -> None:
-        """Придвижване на хартия една линия (0x2B)."""
-        with self._device_lock:
-            self._send_command(0x2B)
-
-    # ---------------------- Примерен workflow ----------------------
-
-    def print_simple_receipt_example(self) -> bool:
-        """
-        Примерен бон: един артикул, плащане в брой.
-        Извиква се през IoT (action), не от main().
-        """
-        try:
-            self.open_receipt("1", "000000")
-            self.sell_item("Тестов артикул", VATClass.VAT_A, 10.00, quantity=1.0)
-            subtotal = self.subtotal()
-            _logger.info("Tremol: междинна сума: %.2f", subtotal)
-            self.cash_payment_and_close()
-            self._status['status'] = self.STATUS_CONNECTED
-            return True
-        except FiscalPrinterError as e:
-            _logger.error("Tremol: фискална грешка: %s", e)
-            try:
-                self.cancel_receipt()
-            except Exception:  # noqa: BLE001
-                pass
-            self._status['status'] = self.STATUS_ERROR
-            self._status['message_title'] = str(e)
-            return False
-        except Exception as e:  # noqa: BLE001
-            _logger.exception("Tremol: неочаквана грешка при печат")
-            self._status['status'] = self.STATUS_ERROR
-            self._status['message_title'] = str(e)
-            return False
-
-
-# ====================== Tremol ISL драйвер върху базовия ISL ======================
-
-TremolIslProtocol = SerialProtocol(
-    name='Tremol ISL',
-    baudrate=115200,
-    bytesize=serial.EIGHTBITS,
-    stopbits=serial.STOPBITS_ONE,
-    parity=serial.PARITY_NONE,
-    timeout=5,
-    writeTimeout=1,
-    measureRegexp=None,
-    statusRegexp=None,
-    commandTerminator=b'',
-    commandDelay=0.1,
-    measureDelay=0.1,
-    newMeasureDelay=0.2,
-    measureCommand=b'',
-    emptyAnswerValid=False,
-)
-
-
-class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
-    """
-    ISL-базиран IoT драйвер за Tremol.
-
-    - Наследява общия IslFiscalPrinterBase;
-    - Ниско ниво `_isl_request` ще използва Tremol‑подобен фрейминг
-      (STX/LEN/NBL/CMD/DATA/CS/ETX) – TODO;
-    - Тук са само Tremol‑специфичните mapping-и (TaxGroup, PaymentType и др.).
-    """
-
-    _protocol = TremolIslProtocol
+    connection_type = "serial"
     device_type = "fiscal_printer"
+    device_connection = "serial"
+    device_name = "Datecs ISL Fiscal Printer"
+
+    # ISL frame константи (както в BgIslFiscalPrinter.Frame.cs)
+    MARKER_SPACE = 0x20
+    MARKER_SYN = 0x16
+    MARKER_NAK = 0x15
+    MARKER_PREAMBLE = 0x01
+    MARKER_POSTAMBLE = 0x05
+    MARKER_SEPARATOR = 0x04
+    MARKER_TERMINATOR = 0x03
+
+    MAX_SEQUENCE_NUMBER = 0x7F - MARKER_SPACE  # както в C#
+    MAX_WRITE_RETRIES = 6
+    MAX_READ_RETRIES = 200
+
+    # Serial протокол (съвместим с Datecs ISL)
+    _protocol = SerialProtocol(
+        name="Datecs ISL",
+        baudrate=115200,
+        bytesize=serial.EIGHTBITS,
+        stopbits=serial.STOPBITS_ONE,
+        parity=serial.PARITY_NONE,
+        timeout=1,
+        writeTimeout=1,
+        measureRegexp=None,
+        statusRegexp=None,
+        commandTerminator=b"",
+        commandDelay=0.2,
+        measureDelay=0.5,
+        newMeasureDelay=0.2,
+        measureCommand=b"",
+        emptyAnswerValid=False,
+    )
 
     def __init__(self, identifier, device):
         super().__init__(identifier, device)
+        # DeviceInfo по аналогия с BgDatecsP/C/XIslFiscalPrinter.ParseDeviceInfo
         self.info = IslDeviceInfo(
-            manufacturer="Tremol",
-            model="Tremol ISL",
-            comment_text_max_length=40,
-            item_text_max_length=36,
-            operator_password_max_length=6,
+            manufacturer="Datecs",
+            model="",
+            firmware_version="",
+            comment_text_max_length=46,  # FP-700X: ~printColumns-2, за безопасност 46
+            item_text_max_length=34,
+            operator_password_max_length=8,
         )
+        # Default options от Datecs ISL C/P/X драйверите
         self.options.update(
             {
                 "Operator.ID": "1",
-                "Operator.Password": "000000",
+                "Operator.Password": "0000",
+                "Administrator.ID": "20",
+                "Administrator.Password": "9999",
             }
         )
 
-    # ---------------------- Ниско ниво ISL ----------------------
+        self._frame_sequence_number = 0
+        self._frame_lock = Lock()
 
-    def _isl_request(self, command: int, data: str = "") -> tuple[str, DeviceStatus, bytes]:
+        # Регистрация на POS → ISL действия по стандартния IoT канал
+        self._actions.update(
+            {
+                "pos_print_receipt": self._action_pos_print_receipt,
+                "pos_print_reversal_receipt": self._action_pos_print_reversal_receipt,
+                "pos_deposit_money": self._action_pos_deposit_money,
+                "pos_withdraw_money": self._action_pos_withdraw_money,
+                "pos_x_report": self._action_pos_x_report,
+                "pos_z_report": self._action_pos_z_report,
+                "pos_print_duplicate": self._action_pos_print_duplicate,
+            }
+        )
+
+    # ====================== ISL фрейминг (ниско ниво) ======================
+
+    def _uint16_to_4bytes(self, word: int) -> bytes:
         """
-        Ниско ниво ISL заявка за Tremol.
-
-        TODO:
-          - изграждане на Tremol frame за `command` и `data`
-            (STX/LEN/NBL/CMD/DATA/CS/ETX);
-          - изпращане през self._connection;
-          - четене на отговор, парсване на ASCII payload и статус байтове (ако има);
-          - конвертиране на статусите към DeviceStatus.
-
-        В момента е placeholder.
+        UInt16 → 4 ASCII цифри (0x30 + nibble), както в BgIslFiscalPrinter.UInt16To4Bytes.
         """
-        raise NotImplementedError("Имплементирай Tremol ISL протокола тук")
+        return bytes(
+            [
+                ((word >> 12) & 0x0F) + 0x30,
+                ((word >> 8) & 0x0F) + 0x30,
+                ((word >> 4) & 0x0F) + 0x30,
+                (word & 0x0F) + 0x30,
+            ]
+        )
+
+    def _compute_bcc(self, fragment: bytes) -> bytes:
+        """
+        BCC по ISL – сума на байтовете, представена като 4 ASCII цифри.
+        """
+        bcc_sum = 0
+        for b in fragment:
+            bcc_sum += b
+        return self._uint16_to_4bytes(bcc_sum & 0xFFFF)
+
+    def _build_host_frame(self, command: int, data: Optional[bytes]) -> bytes:
+        """
+        BuildHostFrame от BgIslFiscalPrinter.Frame.cs – стандартен ISL кадър.
+        """
+        if data is None:
+            data = b""
+
+        frame = bytearray()
+        frame.append(self.MARKER_PREAMBLE)
+
+        # LEN: MarkerSpace + 4 + len(data)
+        length = self.MARKER_SPACE + 4 + len(data)
+        frame.append(length)
+
+        # SequenceNumber: MarkerSpace + seq
+        self._frame_sequence_number += 1
+        if self._frame_sequence_number > self.MAX_SEQUENCE_NUMBER:
+            self._frame_sequence_number = 0
+        frame.append(self.MARKER_SPACE + self._frame_sequence_number)
+
+        # Command (single byte)
+        frame.append(command & 0xFF)
+
+        # Data
+        frame.extend(data)
+
+        # Postamble
+        frame.append(self.MARKER_POSTAMBLE)
+
+        # BCC от всичко без preamble
+        frame.extend(self._compute_bcc(frame[1:]))
+
+        # Terminator
+        frame.append(self.MARKER_TERMINATOR)
+
+        return bytes(frame)
+
+    def _raw_request(self, command: int, data: Optional[bytes]) -> Optional[bytes]:
+        """
+        RawRequest – изпраща ISL кадър и връща суровия отговор (single packed frame).
+        """
+        if data is None:
+            data = b""
+
+        with self._frame_lock:
+            request = self._build_host_frame(command, data)
+
+            for _w in range(self.MAX_WRITE_RETRIES):
+                if not self._connection or not self._connection.is_open:
+                    _logger.error("Datecs ISL: not connected")
+                    return None
+
+                # write
+                _logger.debug("Datecs ISL <<< %s", request.hex(" "))
+                try:
+                    self._connection.write(request)
+                    self._connection.flush()
+                except Exception as e:  # noqa: BLE001
+                    _logger.exception("Datecs ISL: write error: %s", e)
+                    raise
+
+                # read loop
+                current = bytearray()
+                for _r in range(self.MAX_READ_RETRIES):
+                    try:
+                        buf = self._connection.read(256)
+                    except Exception as e:  # noqa: BLE001
+                        _logger.exception("Datecs ISL: read error: %s", e)
+                        return None
+
+                    if not buf:
+                        # timeout / no data → опитваме пак
+                        time.sleep(0.01)
+                        continue
+
+                    _logger.debug("Datecs ISL >>> %s", buf.hex(" "))
+
+                    for b in buf:
+                        current.append(b)
+                        if b in (self.MARKER_NAK, self.MARKER_SYN, self.MARKER_TERMINATOR):
+                            # край на кадър или контролен байт
+                            if current[0] == self.MARKER_PREAMBLE:
+                                return bytes(current)
+                            if b == self.MARKER_NAK:
+                                # повторен опит
+                                current.clear()
+                                break
+                            if b == self.MARKER_SYN:
+                                # устройство е заето – четем още
+                                current.clear()
+                                break
+
+                # след MAX_READ_RETRIES – повторяме write
+            return None
+
+    def _parse_response_frame(self, raw: Optional[bytes]) -> Tuple[str, bytes]:
+        """
+        ParseResponse от BgIslFiscalPrinter.Frame.cs – тук опростено:
+
+        - намира PRE, SEP, PST, TERM;
+        - данните са между PRE+4 и SEP;
+        - статус байтовете са между SEP+1 и PST;
+        - връща (ASCII response, status_bytes).
+        """
+        if raw is None:
+            raise RuntimeError("no response from device")
+
+        preamble_pos = separator_pos = postamble_pos = terminator_pos = None
+        for i, b in enumerate(raw):
+            if b == self.MARKER_PREAMBLE:
+                preamble_pos = i
+            elif b == self.MARKER_SEPARATOR:
+                separator_pos = i
+            elif b == self.MARKER_POSTAMBLE:
+                postamble_pos = i
+            elif b == self.MARKER_TERMINATOR:
+                terminator_pos = i
+
+        # опростена защита – ако не намерим валиден формат, хвърляме
+        if (
+            preamble_pos is None
+            or separator_pos is None
+            or postamble_pos is None
+            or terminator_pos is None
+            or not (preamble_pos + 4 <= separator_pos < postamble_pos < terminator_pos)
+        ):
+            raise RuntimeError("invalid ISL response frame")
+
+        data = raw[preamble_pos + 4 : separator_pos]
+        status_bytes = raw[separator_pos + 1 : postamble_pos]
+
+        try:
+            resp_str = data.decode("cp1251", errors="ignore")
+        except Exception:  # noqa: BLE001
+            resp_str = ""
+
+        return resp_str, status_bytes
+
+    # ---------------------- Реализация на абстрактния _isl_request ----------------------
+
+    def _isl_request(self, command: int, data: str = "") -> Tuple[str, DeviceStatus, bytes]:
+        """
+        Реалният ISL request за Datecs:
+
+        - build frame през _build_host_frame;
+        - изпраща през self._connection;
+        - чете отговора през _raw_request;
+        - парсира payload + status bytes;
+        - връща (response_str, DeviceStatus, status_bytes).
+        """
+        try:
+            raw = self._raw_request(command, data.encode("cp1251") if data else None)
+        except Exception as e:  # noqa: BLE001
+            _logger.exception("Datecs ISL: error during _isl_request for cmd=0x%02X", command)
+            status = DeviceStatus()
+            status.add_error("E101", str(e))
+            return "", status, b""
+
+        if raw is None:
+            status = DeviceStatus()
+            status.add_error("E101", "No response from device")
+            return "", status, b""
+
+        try:
+            resp_str, status_bytes = self._parse_response_frame(raw)
+        except Exception as e:  # noqa: BLE001
+            _logger.exception("Datecs ISL: failed to parse response for cmd=0x%02X", command)
+            status = DeviceStatus()
+            status.add_error("E107", str(e))
+            return "", status, b""
+
+        # TODO: добави реално парсване на статус байтовете по Datecs ISL документацията.
+        status = DeviceStatus()
+        return resp_str, status, bytes(status_bytes)
 
     # ---------------------- Tax groups / payments ----------------------
 
     def get_tax_group_text(self, tax_group: TaxGroup) -> str:
         """
-        Tremol VAT класове A..H – мапваме от TaxGroup1..8.
+        Datecs ISL по подразбиране използва български А..З данъчни групи.
         """
         mapping = {
-            TaxGroup.TaxGroup1: "A",
-            TaxGroup.TaxGroup2: "B",
-            TaxGroup.TaxGroup3: "C",
-            TaxGroup.TaxGroup4: "D",
-            TaxGroup.TaxGroup5: "E",
-            TaxGroup.TaxGroup6: "F",
-            TaxGroup.TaxGroup7: "G",
-            TaxGroup.TaxGroup8: "H",
+            TaxGroup.TaxGroup1: "А",
+            TaxGroup.TaxGroup2: "Б",
+            TaxGroup.TaxGroup3: "В",
+            TaxGroup.TaxGroup4: "Г",
+            TaxGroup.TaxGroup5: "Д",
+            TaxGroup.TaxGroup6: "Е",
+            TaxGroup.TaxGroup7: "Ж",
+            TaxGroup.TaxGroup8: "З",
         }
         if tax_group not in mapping:
-            raise ValueError(f"Unsupported tax group for Tremol ISL: {tax_group}")
+            raise ValueError(f"Unsupported tax group for Datecs ISL: {tax_group}")
         return mapping[tax_group]
 
     def get_payment_type_mappings(self) -> Dict[IslPaymentType, str]:
         """
-        Типичен Tremol mapping за ISL‑стил плащания:
+        Базов Datecs ISL mapping (опростен вариант):
 
-        - Cash  -> "P"
-        - Card  -> "C"
-        - Check -> "N"
-        - Reserved1 -> "D"
+          - CASH  -> "P"
+          - CARD  -> "C"
+          - CHECK -> "N"
+          - RESERVED1 -> "D"
+
+        Ако трябва по-дълъг списък (Coupons, Bank, ...), може да се преработи.
         """
         return {
             IslPaymentType.CASH: "P",
@@ -565,3 +360,78 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
             IslPaymentType.CHECK: "N",
             IslPaymentType.RESERVED1: "D",
         }
+
+    # ====================== POS → ISL действия (през базовите POS helper-и) ======================
+
+    def _action_pos_print_receipt(self, data: dict):
+        pos_receipt = data.get("data") or data.get("receipt") or {}
+        info, status = self.pos_print_receipt(pos_receipt)
+        return {
+            "ok": status.ok,
+            "info": info,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_print_reversal_receipt(self, data: dict):
+        pos_receipt = data.get("data") or data.get("receipt") or {}
+        info, status = self.pos_print_reversal_receipt(pos_receipt)
+        return {
+            "ok": status.ok,
+            "info": info,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_deposit_money(self, data: dict):
+        status = self.pos_deposit_money(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_withdraw_money(self, data: dict):
+        status = self.pos_withdraw_money(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_x_report(self, data: dict):
+        status = self.pos_x_report(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_z_report(self, data: dict):
+        status = self.pos_z_report(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_print_duplicate(self, data: dict):
+        status = self.pos_print_duplicate(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    # ====================== Поддръжка / избор на устройство ======================
+
+    @classmethod
+    def supported(cls, device):
+        """
+        TODO: Datecs-специфичен probe (USB VID/PID, product string, първи ISL ping и т.н.).
+
+        Засега връщаме True, за да може драйверът да се използва експериментално.
+        """
+        return True
+
+    @classmethod
+    def get_default_device(cls):
+        devices = [
+            iot_devices[d]
+            for d in iot_devices
+            if getattr(iot_devices[d], "device_type", None) == "fiscal_printer"
+        ]
+        return devices[0] if devices else None

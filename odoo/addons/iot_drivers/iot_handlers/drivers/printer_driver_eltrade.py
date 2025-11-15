@@ -93,6 +93,71 @@ class EltradeIslFiscalPrinterDriver(IslFiscalPrinterBase):
                 "Administrator.Password": "9999",
             }
         )
+        # Регистрация на POS actions по стандартния IoT канал
+        self._actions.update({
+            "pos_print_receipt": self._action_pos_print_receipt,
+            "pos_print_reversal_receipt": self._action_pos_print_reversal_receipt,
+            "pos_deposit_money": self._action_pos_deposit_money,
+            "pos_withdraw_money": self._action_pos_withdraw_money,
+            "pos_x_report": self._action_pos_x_report,
+            "pos_z_report": self._action_pos_z_report,
+            "pos_print_duplicate": self._action_pos_print_duplicate,
+        })
+
+    def _action_pos_print_receipt(self, data: dict):
+        pos_receipt = data.get("data") or data.get("receipt") or {}
+        info, status = self.pos_print_receipt(pos_receipt)
+        return {
+            "ok": status.ok,
+            "info": info,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_print_reversal_receipt(self, data: dict):
+        pos_receipt = data.get("data") or data.get("receipt") or {}
+        info, status = self.pos_print_reversal_receipt(pos_receipt)
+        return {
+            "ok": status.ok,
+            "info": info,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_deposit_money(self, data: dict):
+        payload = data.get("data") or data
+        status = self.pos_deposit_money(payload)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_withdraw_money(self, data: dict):
+        payload = data.get("data") or data
+        status = self.pos_withdraw_money(payload)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_x_report(self, data: dict):
+        status = self.pos_x_report(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_z_report(self, data: dict):
+        status = self.pos_z_report(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
+
+    def _action_pos_print_duplicate(self, data: dict):
+        status = self.pos_print_duplicate(data.get("data") or data)
+        return {
+            "ok": status.ok,
+            "messages": [m.text for m in (status.messages + status.errors)],
+        }
 
     # ---------------------- Поддръжка / избор на устройство ----------------------
 
