@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Certificate Management - IoT Box</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        .certificate-card {
+            border-left: 4px solid #0d6efd;
+        }
+        .status-healthy {
+            color: #198754;
+        }
+        .status-warning {
+            color: #ffc107;
+        }
+        .status-error {
+            color: #dc3545;
+        }
+        .cert-details {
+            font-family: monospace;
+            font-size: 0.9rem;
+            background: #f8f9fa;
+            padding: 1rem;
+            border-radius: 0.25rem;
+        }
+        pre {
+            background: #f8f9fa;
+            padding: 1rem;
+            border-radius: 0.25rem;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-dark bg-primary">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="/">
+                <i class="bi bi-shield-lock"></i> IoT Box - Certificate Management
+            </a>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <!-- CA Health Status -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header bg-primary text-white">
+                        <i class="bi bi-heart-pulse"></i> Certificate Authority Status
+                    </div>
+                    <div class="card-body">
+                        <div id="ca-health" class="d-flex align-items-center">
+                            <div class="spinner-border text-primary me-3" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                            <span>Checking CA status...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Current Certificate Info -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card certificate-card">
+                    <div class="card-header bg-light">
+                        <i class="bi bi-file-earmark-lock"></i> Current Certificate
+                    </div>
+                    <div class="card-body">
+                        <div id="cert-info">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Certificate Actions -->
+        <div class="row mb-4">
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-body text-center">
+                        <i class="bi bi-plus-circle fs-1 text-success mb-3"></i>
+                        <h5 class="card-title">Generate New Certificate</h5>
+                        <p class="card-text">Create a new certificate for this IoT Box</p>
+                        <button class="btn btn-success" onclick="showGenerateModal()">
+                            <i class="bi bi-plus-lg"></i> Generate
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-body text-center">
+                        <i class="bi bi-arrow-repeat fs-1 text-primary mb-3"></i>
+                        <h5 class="card-title">Renew Certificate</h5>
+                        <p class="card-text">Renew the existing certificate</p>
+                        <button class="btn btn-primary" onclick="renewCertificate()">
+                            <i class="bi bi-arrow-repeat"></i> Renew
+                        </button>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card h-100">
+                    <div class="card-body text-center">
+                        <i class="bi bi-download fs-1 text-info mb-3"></i>
+                        <h5 class="card-title">Download Root CA</h5>
+                        <p class="card-text">Download root certificate to trust</p>
+                        <a href="/iot_drivers/certificate/download_root" class="btn btn-info" download>
+                            <i class="bi bi-download"></i> Download
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Provisioners -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header bg-light">
+                        <i class="bi bi-key"></i> Provisioners
+                    </div>
+                    <div class="card-body">
+                        <div id="provisioners">
+                            <div class="spinner-border text-primary" role="status">
+                                <span class="visually-hidden">Loading...</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Generate Certificate Modal -->
+    <div class="modal fade" id="generateModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Generate New Certificate</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="generateForm">
+                        <div class="mb-3">
+                            <label for="commonName" class="form-label">Common Name (CN)</label>
+                            <input type="text" class="form-control" id="commonName" required>
+                            <div class="form-text">e.g., iot-box.local</div>
+                        </div>
+                        <div class="mb-3">
+                            <label for="sans" class="form-label">Subject Alternative Names (SANs)</label>
+                            <textarea class="form-control" id="sans" rows="3"></textarea>
+                            <div class="form-text">One per line, e.g.:<br>*.iot-box.local<br>localhost<br>127.0.0.1</div>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-success" onclick="generateCertificate()">
+                        <i class="bi bi-check-lg"></i> Generate
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div class="position-fixed bottom-0 end-0 p-3" style="z-index: 11">
+        <div id="toast" class="toast" role="alert">
+            <div class="toast-header">
+                <strong class="me-auto">Notification</strong>
+                <button type="button" class="btn-close" data-bs-dismiss="toast"></button>
+            </div>
+            <div class="toast-body" id="toastMessage"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            loadCAHealth();
+            loadCertificateInfo();
+            loadProvisioners();
+        });
+
+        // Load CA Health
+        async function loadCAHealth() {
+            try {
+                const response = await fetch('/iot_drivers/certificate/health');
+                const data = await response.json();
+
+                const healthDiv = document.getElementById('ca-health');
+
+                if (data.status === 'healthy') {
+                    healthDiv.innerHTML = `
+                        <i class="bi bi-check-circle-fill fs-3 status-healthy me-3"></i>
+                        <div>
+                            <strong>Healthy</strong>
+                            <br><small class="text-muted">${data.message}</small>
+                        </div>
+                    `;
+                } else {
+                    healthDiv.innerHTML = `
+                        <i class="bi bi-x-circle-fill fs-3 status-error me-3"></i>
+                        <div>
+                            <strong>Unhealthy</strong>
+                            <br><small class="text-muted">${data.message}</small>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                document.getElementById('ca-health').innerHTML = `
+                    <i class="bi bi-exclamation-triangle-fill fs-3 status-error me-3"></i>
+                    <div>
+                        <strong>Error</strong>
+                        <br><small class="text-muted">${error.message}</small>
+                    </div>
+                `;
+            }
+        }
+
+        // Load Certificate Info
+        async function loadCertificateInfo() {
+            try {
+                const response = await fetch('/iot_drivers/certificate/info');
+                const data = await response.json();
+
+                const certDiv = document.getElementById('cert-info');
+
+                if (data.status === 'success') {
+                    const daysLeft = data.days_left;
+                    const statusClass = daysLeft > 30 ? 'status-healthy' : daysLeft > 7 ? 'status-warning' : 'status-error';
+                    const statusIcon = daysLeft > 30 ? 'check-circle-fill' : daysLeft > 7 ? 'exclamation-triangle-fill' : 'x-circle-fill';
+
+                    certDiv.innerHTML = `
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h6><i class="bi bi-info-circle"></i> Certificate Details</h6>
+                                <div class="cert-details">
+                                    <div><strong>Common Name:</strong> ${data.common_name}</div>
+                                    <div><strong>Serial:</strong> ${data.serial_number}</div>
+                                    <div><strong>Valid From:</strong> ${new Date(data.not_before).toLocaleString()}</div>
+                                    <div><strong>Valid Until:</strong> ${new Date(data.not_after).toLocaleString()}</div>
+                                    <div><strong>Issuer:</strong> ${data.issuer}</div>
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <h6><i class="bi bi-calendar-check"></i> Expiration Status</h6>
+                                <div class="text-center p-4">
+                                    <i class="bi bi-${statusIcon} fs-1 ${statusClass}"></i>
+                                    <h3 class="${statusClass} mt-2">${daysLeft} days</h3>
+                                    <p class="text-muted">until expiration</p>
+                                </div>
+                                <div class="mt-3">
+                                    <h6><i class="bi bi-list-ul"></i> Subject Alternative Names</h6>
+                                    <ul class="list-group list-group-flush">
+                                        ${data.sans.map(san => `<li class="list-group-item">${san}</li>`).join('')}
+                                    </ul>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                } else {
+                    certDiv.innerHTML = `
+                        <div class="alert alert-warning">
+                            <i class="bi bi-exclamation-triangle"></i> ${data.message}
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                document.getElementById('cert-info').innerHTML = `
+                    <div class="alert alert-danger">
+                        <i class="bi bi-x-circle"></i> Error: ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        // Load Provisioners
+        async function loadProvisioners() {
+            try {
+                const response = await fetch('/iot_drivers/certificate/provisioners');
+                const data = await response.json();
+
+                const provDiv = document.getElementById('provisioners');
+
+                if (data.status === 'success' && data.provisioners.length > 0) {
+                    provDiv.innerHTML = `
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Name</th>
+                                        <th>Type</th>
+                                        <th>Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${data.provisioners.map(p => `
+                                        <tr>
+                                            <td><i class="bi bi-key"></i> ${p.name}</td>
+                                            <td><span class="badge bg-info">${p.type}</span></td>
+                                            <td><i class="bi bi-check-circle-fill text-success"></i> Active</td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                    `;
+                } else {
+                    provDiv.innerHTML = `
+                        <div class="alert alert-info">
+                            <i class="bi bi-info-circle"></i> No provisioners found
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                document.getElementById('provisioners').innerHTML = `
+                    <div class="alert alert-danger">
+                        <i class="bi bi-x-circle"></i> Error: ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        // Show Generate Modal
+        function showGenerateModal() {
+            const modal = new bootstrap.Modal(document.getElementById('generateModal'));
+            modal.show();
+        }
+
+        // Generate Certificate
+        async function generateCertificate() {
+            const commonName = document.getElementById('commonName').value;
+            const sansText = document.getElementById('sans').value;
+            const sans = sansText ? sansText.split('\n').map(s => s.trim()).filter(s => s) : null;
+
+            if (!commonName) {
+                showToast('Please enter a common name', 'warning');
+                return;
+            }
+
+            try {
+                const response = await fetch('/iot_drivers/certificate/generate', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        jsonrpc: '2.0',
+                        method: 'call',
+                        params: {
+                            common_name: commonName,
+                            sans: sans
+                        }
+                    })
+                });
+
+                const data = await response.json();
+                const result = data.result;
+
+                if (result.status === 'success') {
+                    showToast('Certificate generated successfully!', 'success');
+                    bootstrap.Modal.getInstance(document.getElementById('generateModal')).hide();
+                    setTimeout(() => {
+                        loadCertificateInfo();
+                    }, 1000);
+                } else {
+                    showToast('Error: ' + result.message, 'danger');
+                }
+            } catch (error) {
+                showToast('Error: ' + error.message, 'danger');
+            }
+        }
+
+        // Renew Certificate
+        async function renewCertificate() {
+            if (!confirm('Are you sure you want to renew the certificate?')) {
+                return;
+            }
+
+            try {
+                const response = await fetch('/iot_drivers/certificate/renew', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        jsonrpc: '2.0',
+                        method: 'call',
+                        params: {}
+                    })
+                });
+
+                const data = await response.json();
+                const result = data.result;
+
+                if (result.status === 'success') {
+                    showToast('Certificate renewed successfully!', 'success');
+                    setTimeout(() => {
+                        loadCertificateInfo();
+                    }, 1000);
+                } else {
+                    showToast('Error: ' + result.message, 'danger');
+                }
+            } catch (error) {
+                showToast('Error: ' + error.message, 'danger');
+            }
+        }
+
+        // Show Toast
+        function showToast(message, type = 'info') {
+            const toast = document.getElementById('toast');
+            const toastMessage = document.getElementById('toastMessage');
+
+            toastMessage.textContent = message;
+            toast.className = `toast bg-${type} text-white`;
+
+            const bsToast = new bootstrap.Toast(toast);
+            bsToast.show();
+        }
+
+        // Auto refresh every 60 seconds
+        setInterval(() => {
+            loadCAHealth();
+            loadCertificateInfo();
+        }, 60000);
+    </script>
+</body>
+</html>

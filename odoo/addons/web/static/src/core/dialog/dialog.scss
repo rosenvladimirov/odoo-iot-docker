@@ -1,0 +1,139 @@
+.modal.o_technical_modal {
+    --o-control-panel-breadcrumbs-display: none;
+
+    backdrop-filter: blur(.5px) grayscale(50%);
+
+    .modal-content {
+        .modal-header .modal-title {
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+        }
+    }
+
+    .modal-footer {
+        text-align: left;
+
+        button {
+            margin: 0; // Reset boostrap.
+        }
+
+        button.o-default-button:not(:only-child) {
+            display: none;
+        }
+
+        @include media-breakpoint-down(md) {
+            .btn {
+                width: 45%;
+                text-overflow: ellipsis;
+                white-space: inherit;
+            }
+        }
+
+        @include media-breakpoint-down(sm) {
+            > .btn {
+                padding-top: map-get($spacers, 2);
+                padding-bottom: map-get($spacers, 2);
+            }
+        }
+    }
+
+    &.o_modal_design_minimal {
+        --modal-header-border-width: 0;
+        --modal-footer-border-width: 0;
+
+        .modal-body {
+            padding: 0 var(--modal-padding);
+        }
+
+        @include media-breakpoint-down(sm) {
+            .modal-dialog {
+                --modal-margin: #{$modal-dialog-margin * 4 $modal-dialog-margin * 2};
+
+                display: flex;
+                margin: 0;
+                padding: var(--modal-margin);
+                height: 100vh;
+            }
+
+            .modal-content {
+                max-height: calc(100vh - #{$modal-dialog-margin * 8});
+            }
+        }
+    }
+
+    @include media-breakpoint-down(sm) {
+        &.o_modal_full {
+            --modal-margin: 0;
+            --modal-border-width: 0;
+            --modal-border-radius: 0;
+            --modal-box-shadow: #{$border-width * -1 0 0 $border-color};
+
+            overflow: visible;
+
+            .modal-dialog, .modal-content, .modal-body {
+                height: 100%;
+            }
+
+            .modal-header {
+                padding: 0;
+
+                .modal-title {
+                    padding: var(--modal-header-padding);
+                    padding-right: 0;
+                }
+
+                .btn-close, .oi-arrow-left[data-bs-dismiss="modal"] {
+                    padding: var(--modal-header-padding);
+                }
+
+                .oi-arrow-left[data-bs-dismiss="modal"] + .modal-title {
+                    padding-left: 0;
+                }
+
+            }
+
+            .modal-body {
+                overflow-y: auto;
+            }
+
+            @media (prefers-reduced-motion: no-preference) {
+                .modal-content {
+                    animation: modal-in-sm $o-modal-animation-duration $o-easing-enter;
+                }
+            }
+        }
+    }
+}
+
+.modal.o_inactive_modal {
+    z-index: $zindex-modal-backdrop - 1;
+}
+
+.o_dialog > .modal {
+    display: block;
+    overflow: hidden;
+}
+
+@include media-breakpoint-up(sm) {
+    .modal-content {
+        .modal-header {
+            cursor: grab;
+        }
+    }
+
+    html:has(body.modal-open .modal-content.o_dragged) {
+        cursor: grabbing
+    }
+
+    .modal-fs {
+        width: calc(100% - #{2 * $modal-dialog-margin-y-sm-up});
+        max-width: none;
+    }
+}
+
+@keyframes modal-in-sm {
+    from {
+        transform: translateX(100%);
+    }
+}

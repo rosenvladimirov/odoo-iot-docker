@@ -1,0 +1,243 @@
+version: '3.8'
+
+# ============================================
+# ODOO IOT BOX WITH STEP-CA & TRAEFIK
+# ============================================
+
+services:
+  # ===========================================
+  # STEP-CA - Certificate Authority
+  # ===========================================
+  step-ca:
+    build:
+      context: ./docker/step-ca
+      dockerfile: Dockerfile.step-ca
+
+    container_name: step-ca
+    hostname: step-ca
+    restart: unless-stopped
+
+    ports:
+      - "${STEP_CA_PORT:-9000}:9000"
+
+    environment:
+      - TZ=${TIMEZONE:-UTC}
+      - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
+      - STEP_CA_NAME=${STEP_CA_NAME:-IoT Box CA}
+      - STEP_CA_PROVISIONER=${STEP_CA_PROVISIONER:-admin}
+      - STEP_CA_PASSWORD=${STEP_CA_PASSWORD:-changeme}
+      - STEP_CA_URL=https://localhost:9000
+      - RENEWAL_CHECK_INTERVAL=${RENEWAL_CHECK_INTERVAL:-86400}
+
+    volumes:
+      # Persistent CA data
+      - step-ca-config:/home/step/config
+      - step-ca-certs:/home/step/certs
+      - step-ca-secrets:/home/step/secrets
+      - step-ca-db:/home/step/db
+
+      # Shared certificates with Traefik
+      - ./docker/step-ca/certs:/home/step/certs
+
+    networks:
+      - iot-network
+
+    # Custom command to run init + renewal daemon
+    command: >
+      sh -c "/home/step/init-ca.sh &
+             sleep 10 &&
+             /usr/local/bin/renewal-daemon.sh"
+
+    healthcheck:
+      test: ["CMD", "step", "ca", "health", "--ca-url=https://localhost:9000"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    deploy:
+      resources:
+        limits:
+          memory: ${STEP_CA_MEMORY_LIMIT:-256M}
+
+  # ===========================================
+  # TRAEFIK - Reverse Proxy
+  # ===========================================
+  traefik:
+    image: traefik:v2.10
+    container_name: iot-traefik
+    restart: unless-stopped
+
+    security_opt:
+      - no-new-privileges:true
+
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${TRAEFIK_DASHBOARD_PORT:-8080}:8080"
+
+    environment:
+      - TZ=${TIMEZONE:-UTC}
+      - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
+
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./docker/traefik/dynamic:/etc/traefik/dynamic:ro
+
+      # Step-CA certificates
+      - ./docker/step-ca/certs:/certs:ro
+
+      - ./logs/traefik:/var/log/traefik
+
+    labels:
+      - "traefik.enable=true"
+
+      # Dashboard
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.${IOT_DOMAIN:-iot-box.local}`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard.tls=true"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth"
+
+      # Dashboard auth
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_USER:-admin}:${TRAEFIK_DASHBOARD_PASSWORD:-$$apr1$$xyz}"
+
+    networks:
+      - iot-network
+
+    depends_on:
+      step-ca:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+    deploy:
+      resources:
+        limits:
+          memory: ${TRAEFIK_MEMORY_LIMIT:-128M}
+
+  # ===========================================
+  # IOT BOX - Main Application
+  # ===========================================
+  iot-box:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        IOT_VERSION: "1.0.0"
+
+    container_name: odoo-iot-box
+    hostname: ${IOT_IDENTIFIER:-iot-box}
+    restart: unless-stopped
+
+    networks:
+      - iot-network
+
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+      - /dev/ttyUSB0:/dev/ttyUSB0
+      - /dev/ttyUSB1:/dev/ttyUSB1
+      - /dev/ttyACM0:/dev/ttyACM0
+      - /dev/rfkill:/dev/rfkill
+
+    volumes:
+      - ${CONFIG_PATH:-./config}:/app/config
+      - ${LOGS_PATH:-./logs}/iot:/app/logs
+
+      # Step-CA certificates (read-only)
+      - ./docker/step-ca/certs:/app/certs:ro
+
+      - iot-data:/app/data
+      - /var/run/dbus:/var/run/dbus:ro
+      - /var/run/cups:/var/run/cups:ro
+      - /etc/NetworkManager/system-connections:/etc/NetworkManager/system-connections
+
+    environment:
+      - IOT_IN_DOCKER=true
+      - IOT_IDENTIFIER=${IOT_IDENTIFIER:-}
+      - TZ=${TIMEZONE:-UTC}
+      - ODOO_RC=/app/config/odoo.conf
+      - LOG_FILE=/app/logs/odoo.log
+      - LOG_LEVEL=${ODOO_LOG_LEVEL:-info}
+      - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
+      - DEV_MODE=${DEV_MODE:-false}
+      - STEP_CA_URL=https://step-ca:9000
+
+    labels:
+      - "traefik.enable=true"
+
+      # HTTP -> HTTPS redirect
+      - "traefik.http.routers.iot-http.rule=Host(`${IOT_DOMAIN:-iot-box.local}`)"
+      - "traefik.http.routers.iot-http.entrypoints=web"
+      - "traefik.http.routers.iot-http.middlewares=https-redirect@file"
+
+      # HTTPS Router
+      - "traefik.http.routers.iot-https.rule=Host(`${IOT_DOMAIN:-iot-box.local}`)"
+      - "traefik.http.routers.iot-https.entrypoints=websecure"
+      - "traefik.http.routers.iot-https.tls=true"
+      - "traefik.http.routers.iot-https.middlewares=iot-chain@file"
+
+      # Service
+      - "traefik.http.services.iot-service.loadbalancer.server.port=8069"
+
+      # Health check
+      - "traefik.http.services.iot-service.loadbalancer.healthcheck.path=/hw_proxy/hello"
+      - "traefik.http.services.iot-service.loadbalancer.healthcheck.interval=30s"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8069/hw_proxy/hello"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    deploy:
+      resources:
+        limits:
+          memory: ${IOT_BOX_MEMORY_LIMIT:-512M}
+
+    depends_on:
+      traefik:
+        condition: service_healthy
+
+# ===========================================
+# NETWORKS
+# ===========================================
+networks:
+  iot-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+# ===========================================
+# VOLUMES
+# ===========================================
+volumes:
+  iot-data:
+    driver: local
+
+  # Step-CA persistent volumes
+  step-ca-config:
+    driver: local
+  step-ca-certs:
+    driver: local
+  step-ca-secrets:
+    driver: local
+  step-ca-db:
+    driver: local

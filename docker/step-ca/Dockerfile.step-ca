@@ -1,0 +1,26 @@
+FROM smallstep/step-ca:latest
+
+# Install additional tools
+RUN apk add --no-cache \
+    bash \
+    curl \
+    jq \
+    openssl
+
+# Create directories
+RUN mkdir -p /home/step/certs \
+             /home/step/secrets \
+             /home/step/db
+
+# Copy scripts
+COPY scripts/ /usr/local/bin/
+RUN chmod +x /usr/local/bin/*.sh
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD step ca health --ca-url=https://localhost:9000 || exit 1
+
+WORKDIR /home/step
+
+# Default command (will be overridden by docker-compose)
+CMD ["step-ca", "/home/step/config/ca.json"]

@@ -1,0 +1,62 @@
+# ============================================
+# TRAEFIK DYNAMIC CONFIGURATION - MIDDLEWARES
+# ============================================
+
+http:
+  middlewares:
+    # === CORS Middleware ===
+    cors-headers:
+      headers:
+        accessControlAllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+          - PATCH
+        accessControlAllowHeaders:
+          - "*"
+        accessControlAllowOriginList:
+          - "*"  # Will be overridden by env
+        accessControlExposeHeaders:
+          - "*"
+        accessControlMaxAge: 86400
+        accessControlAllowCredentials: true
+        addVaryHeader: true
+
+    # === Security Headers ===
+    security-headers:
+      headers:
+        frameDeny: false  # IoT Box може да се embedва
+        contentTypeNosniff: true
+        browserXssFilter: true
+        referrerPolicy: "strict-origin-when-cross-origin"
+        customFrameOptionsValue: "SAMEORIGIN"
+        customResponseHeaders:
+          X-Powered-By: "Odoo-IoT-Box"
+          Server: ""  # Hide server info
+
+    # === Rate Limiting ===
+    rate-limit:
+      rateLimit:
+        average: 100
+        period: 1m
+        burst: 50
+
+    # === Compression ===
+    compression:
+      compress: true
+
+    # === Redirect HTTPS ===
+    https-redirect:
+      redirectScheme:
+        scheme: https
+        permanent: true
+
+    # === Chain: CORS + Security ===
+    iot-chain:
+      chain:
+        middlewares:
+          - cors-headers
+          - security-headers
+          - compression

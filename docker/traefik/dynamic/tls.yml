@@ -1,0 +1,33 @@
+# ============================================
+# TRAEFIK DYNAMIC CONFIGURATION - TLS
+# ============================================
+
+tls:
+  # === TLS Options ===
+  options:
+    default:
+      minVersion: VersionTLS12
+      cipherSuites:
+        - TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        - TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+        - TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305
+      sniStrict: false
+
+    modern:
+      minVersion: VersionTLS13
+
+  # === Certificates ===
+  certificates:
+    # Self-signed certificate (auto-loaded)
+    - certFile: /certs/cert.pem
+      keyFile: /certs/key.pem
+      stores:
+        - default
+
+  # === Certificate Store ===
+  stores:
+    default:
+      defaultCertificate:
+        certFile: /certs/cert.pem
+        keyFile: /certs/key.pem
+

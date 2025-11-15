@@ -1,0 +1,182 @@
+"""Module to manage odoo code upgrades using git"""
+
+import logging
+import requests
+import subprocess
+from odoo.addons.iot_drivers.tools.helpers import (
+    odoo_restart,
+    require_db,
+    toggleable,
+)
+from odoo.addons.iot_drivers.tools.system import (
+    rpi_only,
+    IS_TEST,
+    git,
+    pip,
+    path_file,
+)
+
+_logger = logging.getLogger(__name__)
+
+
+def get_db_branch(server_url):
+    """Get the current branch of the database.
+
+    :param server_url: The URL of the connected Odoo database.
+    :return: the current branch of the database
+    """
+    try:
+        response = requests.post(server_url + "/web/webclient/version_info", json={}, timeout=5)
+        response.raise_for_status()
+    except requests.exceptions.HTTPError:
+        _logger.exception('Could not reach configured server to get the Odoo version')
+        return None
+    try:
+        return response.json()['result']['server_serie'].replace('~', '-')
+    except ValueError:
+        _logger.exception('Could not load JSON data: Received data is not valid JSON.\nContent:\n%s', response.content)
+        return None
+
+
+@toggleable
+@require_db
+def check_git_branch(server_url=None, force=False):
+    """Update the Odoo code using git to match the branch of the connected database.
+    This method will also update the Python requirements and system packages, based
+    on requirements.txt and packages.txt files.
+
+    If the database cannot be reached, we fetch the last changes from the current branch.
+
+    :param server_url: The URL of the connected Odoo database (provided by decorator).
+    :param force: check out even if the db's branch matches the current one
+    """
+    if IS_TEST:
+        return
+
+    try:
+        target_branch = get_db_branch(server_url)
+        current_branch = git('symbolic-ref', '-q', '--short', 'HEAD')
+        if not git('ls-remote', 'origin', target_branch):
+            _logger.warning("Branch '%s' doesn't exist on github.com/odoo/odoo.git, assuming 'master'", target_branch)
+            target_branch = 'master'
+
+        if current_branch == target_branch and not force:
+            _logger.info("No branch change detected (%s)", current_branch)
+            return
+
+        # Repository updates
+        shallow_lock = path_file("odoo/.git/shallow.lock")
+        if shallow_lock.exists():
+            shallow_lock.unlink()  # In case of previous crash/power-off, clean old lockfile
+        checkout(target_branch)
+        update_requirements()
+
+        # System updates
+        update_packages()
+
+        # Miscellaneous updates (version migrations)
+        misc_migration_updates()
+        _logger.warning("Update completed, restarting...")
+        odoo_restart()
+    except Exception:
+        _logger.exception('An error occurred while trying to update the code with git')
+
+
+def _ensure_production_remote(local_remote):
+    """Ensure that the remote repository is the production one
+    (https://github.com/odoo/odoo.git).
+
+    :param local_remote: The name of the remote repository.
+    """
+    production_remote = "https://github.com/odoo/odoo.git"
+    if git('remote', 'get-url', local_remote) != production_remote:
+        _logger.info("Setting remote repository to production: %s", production_remote)
+        git('remote', 'set-url', local_remote, production_remote)
+
+
+def checkout(branch, remote=None):
+    """Checkout to the given branch of the given git remote.
+
+    :param branch: The name of the branch to check out.
+    :param remote: The name of the local git remote to use (usually ``origin`` but computed if not provided).
+    """
+    _logger.info("Preparing local repository for checkout")
+    git('branch', '-m', branch)  # Rename the current branch to the target branch name
+
+    remote = remote or git('config', f'branch.{branch}.remote') or 'origin'
+    _ensure_production_remote(remote)
+
+    _logger.info("Checking out %s/%s", remote, branch)
+    git('remote', 'set-branches', remote, branch)
+    git('fetch', remote, branch, '--depth=1', '--prune')  # refs/remotes to avoid 'unknown revision'
+    git('reset', 'FETCH_HEAD', '--hard')
+
+    _logger.info("Cleaning the working directory")
+    git('clean', '-dfx')
+
+
+def update_requirements():
+    """Update the Python requirements of the IoT Box, installing the ones
+    listed in the requirements.txt file.
+    """
+    requirements_file = path_file('odoo', 'addons', 'iot_box_image', 'configuration', 'requirements.txt')
+    if not requirements_file.exists():
+        _logger.info("No requirements file found, not updating.")
+        return
+
+    _logger.info("Updating pip requirements")
+    pip('-r', requirements_file)
+
+
+@rpi_only
+def update_packages():
+    """Update apt packages on the IoT Box, installing the ones listed in
+    the packages.txt file.
+    Requires ``writable`` context manager.
+    """
+    packages_file = path_file('odoo', 'addons', 'iot_box_image', 'configuration', 'packages.txt')
+    if not packages_file.exists():
+        _logger.info("No packages file found, not updating.")
+        return
+
+    # update and install packages in the foreground
+    commands = (
+        "export DEBIAN_FRONTEND=noninteractive && "
+        "mount -t proc proc /proc && "
+        "apt-get update && "
+        f"xargs apt-get -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' install < {packages_file}"
+    )
+    _logger.warning("Updating apt packages")
+    if subprocess.run(
+        f'sudo chroot /root_bypass_ramdisks /bin/bash -c "{commands}"', shell=True, check=False
+    ).returncode != 0:
+        _logger.error("An error occurred while trying to update the packages")
+        return
+
+    # upgrade and remove packages in the background
+    background_cmd = 'chroot /root_bypass_ramdisks /bin/bash -c "apt-get upgrade -y && apt-get -y autoremove"'
+    subprocess.Popen(["sudo", "bash", "-c", background_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+@rpi_only
+def misc_migration_updates():
+    """Run miscellaneous updates after the code update."""
+    _logger.warning("Running version migration updates")
+
+    if path_file('odoo', 'addons', 'hw_drivers').exists():
+        # TODO: remove this when v18.4 is deprecated (hw_drivers/,hw_posbox_homepage/ -> iot_drivers/)
+        subprocess.run(
+            ['sed', '-i', 's|iot_drivers|hw_drivers,hw_posbox_homepage|g', '/home/pi/odoo.conf'], check=False
+        )
+
+    # if ramdisk.service points to `setup/iot_box_builder`, we symlink it to
+    # `iot_box_image` or `point_of_sale/tools/posbox` instead
+    iot_box_builder_path = path_file('odoo', 'setup', 'iot_box_builder')
+    iot_box_image_path = path_file('odoo', 'addons', 'iot_box_image', 'configuration')
+    point_of_sale_path = path_file('odoo', 'addons', 'point_of_sale', 'tools', 'posbox', 'configuration')
+    iot_box_builder_path.mkdir(parents=True, exist_ok=True)
+    iot_box_builder_path /= "configuration"
+    if iot_box_image_path.exists():  # images <= v19.1
+        iot_box_builder_path.symlink_to(iot_box_image_path)
+    elif point_of_sale_path.exists():  # images before <=v18.0
+        iot_box_builder_path.symlink_to(point_of_sale_path)
