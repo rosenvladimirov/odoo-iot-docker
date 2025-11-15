@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     make \
+    pkg-config \
     libssl-dev \
     libffi-dev \
     libxml2-dev \
@@ -47,6 +48,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-cups \
     libusb-1.0-0-dev \
     libudev-dev \
+    libfreetype6-dev \
+    libavformat-dev \
+    libavcodec-dev \
+    libavdevice-dev \
+    libavutil-dev \
+    libavfilter-dev \
+    libswscale-dev \
+    libswresample-dev \
     python3-dbus \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
