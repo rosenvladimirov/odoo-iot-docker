@@ -11,6 +11,16 @@ from odoo.addons.iot_drivers.iot_handlers.drivers.serial_base_driver import (
     SerialProtocol,
 )
 from odoo.addons.iot_drivers.main import iot_devices
+from .printer_driver_base_isl import (
+    IslFiscalPrinterBase,
+    IslDeviceInfo,
+    DeviceStatus,
+    StatusMessage,
+    StatusMessageType,
+    TaxGroup,
+    PriceModifierType,
+    PaymentType as IslPaymentType,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -451,3 +461,107 @@ class TremolFiscalPrinterDriver(SerialDriver):
             self._status['status'] = self.STATUS_ERROR
             self._status['message_title'] = str(e)
             return False
+
+
+# ====================== Tremol ISL драйвер върху базовия ISL ======================
+
+TremolIslProtocol = SerialProtocol(
+    name='Tremol ISL',
+    baudrate=115200,
+    bytesize=serial.EIGHTBITS,
+    stopbits=serial.STOPBITS_ONE,
+    parity=serial.PARITY_NONE,
+    timeout=5,
+    writeTimeout=1,
+    measureRegexp=None,
+    statusRegexp=None,
+    commandTerminator=b'',
+    commandDelay=0.1,
+    measureDelay=0.1,
+    newMeasureDelay=0.2,
+    measureCommand=b'',
+    emptyAnswerValid=False,
+)
+
+
+class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
+    """
+    ISL-базиран IoT драйвер за Tremol.
+
+    - Наследява общия IslFiscalPrinterBase;
+    - Ниско ниво `_isl_request` ще използва Tremol‑подобен фрейминг
+      (STX/LEN/NBL/CMD/DATA/CS/ETX) – TODO;
+    - Тук са само Tremol‑специфичните mapping-и (TaxGroup, PaymentType и др.).
+    """
+
+    _protocol = TremolIslProtocol
+    device_type = "fiscal_printer"
+
+    def __init__(self, identifier, device):
+        super().__init__(identifier, device)
+        self.info = IslDeviceInfo(
+            manufacturer="Tremol",
+            model="Tremol ISL",
+            comment_text_max_length=40,
+            item_text_max_length=36,
+            operator_password_max_length=6,
+        )
+        self.options.update(
+            {
+                "Operator.ID": "1",
+                "Operator.Password": "000000",
+            }
+        )
+
+    # ---------------------- Ниско ниво ISL ----------------------
+
+    def _isl_request(self, command: int, data: str = "") -> tuple[str, DeviceStatus, bytes]:
+        """
+        Ниско ниво ISL заявка за Tremol.
+
+        TODO:
+          - изграждане на Tremol frame за `command` и `data`
+            (STX/LEN/NBL/CMD/DATA/CS/ETX);
+          - изпращане през self._connection;
+          - четене на отговор, парсване на ASCII payload и статус байтове (ако има);
+          - конвертиране на статусите към DeviceStatus.
+
+        В момента е placeholder.
+        """
+        raise NotImplementedError("Имплементирай Tremol ISL протокола тук")
+
+    # ---------------------- Tax groups / payments ----------------------
+
+    def get_tax_group_text(self, tax_group: TaxGroup) -> str:
+        """
+        Tremol VAT класове A..H – мапваме от TaxGroup1..8.
+        """
+        mapping = {
+            TaxGroup.TaxGroup1: "A",
+            TaxGroup.TaxGroup2: "B",
+            TaxGroup.TaxGroup3: "C",
+            TaxGroup.TaxGroup4: "D",
+            TaxGroup.TaxGroup5: "E",
+            TaxGroup.TaxGroup6: "F",
+            TaxGroup.TaxGroup7: "G",
+            TaxGroup.TaxGroup8: "H",
+        }
+        if tax_group not in mapping:
+            raise ValueError(f"Unsupported tax group for Tremol ISL: {tax_group}")
+        return mapping[tax_group]
+
+    def get_payment_type_mappings(self) -> Dict[IslPaymentType, str]:
+        """
+        Типичен Tremol mapping за ISL‑стил плащания:
+
+        - Cash  -> "P"
+        - Card  -> "C"
+        - Check -> "N"
+        - Reserved1 -> "D"
+        """
+        return {
+            IslPaymentType.CASH: "P",
+            IslPaymentType.CARD: "C",
+            IslPaymentType.CHECK: "N",
+            IslPaymentType.RESERVED1: "D",
+        }

@@ -5,3 +5,4 @@ from . import proxy
 from . import homepage
 from . import certificate
 from . import eta_controller
+from . import netfp_controller

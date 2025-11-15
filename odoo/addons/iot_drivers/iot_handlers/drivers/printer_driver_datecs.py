@@ -3,130 +3,115 @@
 import logging
 import serial
 import time
-from dataclasses import dataclass
-from typing import List, Optional, Dict
+from enum import Enum
+from typing import Optional, Dict, Any
 
 from odoo.addons.iot_drivers.iot_handlers.drivers.serial_base_driver import (
     SerialDriver,
     SerialProtocol,
-    serial_connection,
 )
 from odoo.addons.iot_drivers.main import iot_devices
+from .printer_driver_base_isl import (
+    IslFiscalPrinterBase,
+    IslDeviceInfo,
+    DeviceStatus,
+    StatusMessage,
+    StatusMessageType,
+    TaxGroup,
+    PriceModifierType,
+    PaymentType as IslPaymentType,
+)
 
 _logger = logging.getLogger(__name__)
 
 
-# ====================== Грешки и статус ======================
+# ====================== Енумерации и грешки ======================
 
-class DatecsError(Exception):
-    """Грешка при комуникация с Datecs устройство"""
-    pass
-
-
-class DatecsTimeoutError(DatecsError):
-    """Timeout при комуникация с Datecs устройство"""
-    pass
-
-
-class FiscalDeviceStatus:
-    """Интерпретация на статус байтовете на Datecs устройство"""
-
-    def __init__(self, status_bytes: bytes):
-        self.status_bytes = status_bytes
-        self.bits = []
-
-        # Преобразуваме всеки байт в 8 бита
-        for byte in status_bytes:
-            bits = []
-            for i in range(8):
-                bits.append((byte >> i) & 1)
-            self.bits.extend(bits)
-
-    @property
-    def cover_open(self) -> bool:
-        return bool(self.bits[6])   # Byte 0, Bit 6
-
-    @property
-    def general_error(self) -> bool:
-        return bool(self.bits[5])   # Byte 0, Bit 5
-
-    @property
-    def printer_failure(self) -> bool:
-        return bool(self.bits[4])   # Byte 0, Bit 4
-
-    @property
-    def rtc_not_synchronized(self) -> bool:
-        return bool(self.bits[2])   # Byte 0, Bit 2
-
-    @property
-    def invalid_command(self) -> bool:
-        return bool(self.bits[1])   # Byte 0, Bit 1
-
-    @property
-    def syntax_error(self) -> bool:
-        return bool(self.bits[0])   # Byte 0, Bit 0
-
-    @property
-    def non_fiscal_receipt_open(self) -> bool:
-        return bool(self.bits[21])  # Byte 2, Bit 5
-
-    @property
-    def ej_nearly_full(self) -> bool:
-        return bool(self.bits[20])  # Byte 2, Bit 4
-
-    @property
-    def fiscal_receipt_open(self) -> bool:
-        return bool(self.bits[19])  # Byte 2, Bit 3
-
-    @property
-    def ej_full(self) -> bool:
-        return bool(self.bits[18])  # Byte 2, Bit 2
-
-    @property
-    def near_paper_end(self) -> bool:
-        return bool(self.bits[17])  # Byte 2, Bit 1
-
-    @property
-    def end_of_paper(self) -> bool:
-        return bool(self.bits[16])  # Byte 2, Bit 0
-
-    @property
-    def fiscal_memory_damaged(self) -> bool:
-        return bool(self.bits[38])  # Byte 4, Bit 6
-
-    @property
-    def fiscal_memory_full(self) -> bool:
-        return bool(self.bits[36])  # Byte 4, Bit 4
-
-    @property
-    def device_fiscalized(self) -> bool:
-        return bool(self.bits[43])  # Byte 5, Bit 3
+class VATClass(Enum):
+    VAT_A = "А"
+    VAT_B = "Б"
+    VAT_C = "В"
+    VAT_D = "Г"
+    VAT_E = "Д"
+    VAT_F = "Е"
+    VAT_G = "Ж"
+    VAT_H = "З"
+    FORBIDDEN = "*"
 
 
-@dataclass
-class DatecsResponse:
-    """Структура на отговор от Datecs устройство"""
-    error_code: int
-    data: List[str]
-    status: FiscalDeviceStatus
-    raw_message: bytes
+class PaymentType(Enum):
+    CASH = "0"
+    PAYMENT_1 = "1"
+    PAYMENT_2 = "2"
+    PAYMENT_3 = "3"
+    PAYMENT_4 = "4"
+    PAYMENT_5 = "5"
+    PAYMENT_6 = "6"
+    PAYMENT_7 = "7"
+    PAYMENT_8 = "8"
+    PAYMENT_9 = "9"
+    PAYMENT_10 = "10"
+    CURRENCY = "11"
 
 
-# ====================== Serial протокол за IoT ======================
+class FiscalPrinterError(Exception):
+    """Грешка от фискалния принтер Tremol."""
 
-DatecsSerialProtocol = SerialProtocol(
-    name='Datecs Fiscal Printer',
+    def __init__(self, error_code: str, message: str):
+        self.error_code = error_code
+        self.message = message
+        super().__init__(f"Error {error_code}: {message}")
+
+
+# ====================== Таблици с грешки ======================
+
+ERROR_CODES = {
+    "30": "OK",
+    "31": "Out of paper, printer failure",
+    "32": "Registers overflow",
+    "33": "Clock failure or incorrect date&time",
+    "34": "Opened fiscal receipt",
+    "35": "Payment residue account",
+    "36": "Opened non-fiscal receipt",
+    "37": "Registered payment but receipt is not closed",
+    "38": "Fiscal memory failure",
+    "39": "Incorrect password",
+    "3a": "Missing external display",
+    "3b": "24hours block – unprinted Z report",
+    "3c": "Overheated printer thermal head",
+    "3d": "Interrupt power supply in fiscal receipt",
+    "3e": "Overflow EJ",
+    "3f": "Insufficient conditions",
+}
+
+COMMAND_ERROR_CODES = {
+    "30": "OK",
+    "31": "Invalid command",
+    "32": "Illegal command",
+    "33": "Z daily report is not zero",
+    "34": "Syntax error",
+    "35": "Input registers overflow",
+    "36": "Zero input registers",
+    "37": "Unavailable transaction for correction",
+    "38": "Insufficient amount on hand",
+}
+
+
+# ====================== Serial протокол ======================
+
+TremolBGProtocol = SerialProtocol(
+    name='Tremol BG Fiscal Printer',
     baudrate=115200,
     bytesize=serial.EIGHTBITS,
     stopbits=serial.STOPBITS_ONE,
     parity=serial.PARITY_NONE,
-    timeout=0.5,
-    writeTimeout=0.5,
+    timeout=5,
+    writeTimeout=1,
     measureRegexp=None,
     statusRegexp=None,
     commandTerminator=b'',
     commandDelay=0.1,
-    measureDelay=0.5,
+    measureDelay=0.1,
     newMeasureDelay=0.2,
     measureCommand=b'',
     emptyAnswerValid=False,
@@ -135,30 +120,27 @@ DatecsSerialProtocol = SerialProtocol(
 
 # ====================== IoT драйвер + протокол ======================
 
-class DatecsFiscalPrinterDriver(SerialDriver):
+class TremolFiscalPrinterDriver(SerialDriver):
     """
-    IoT драйвер за фискален принтер Datecs.
+    IoT драйвер за български фискален принтер Tremol.
 
-    - наследява SerialDriver (като TremolG03 драйвера),
-    - вътре съдържа Datecs протокола (фрейминг, BCC, парсване),
-    - предоставя high-level методи: open_receipt, register_sale, payment, close и т.н.
+    - наследява SerialDriver (като TremolG03 драйвера за Кения),
+    - вътре реализира протокола (STX/LEN/NBL/CMD/DATA/CS/ETX),
+    - предоставя high‑level API: open_receipt, sell_item, subtotal, payment, close...
     """
 
-    _protocol = DatecsSerialProtocol
+    _protocol = TremolBGProtocol
 
     def __init__(self, identifier, device):
         super().__init__(identifier, device)
         self.device_type = 'fiscal_printer'
-        self.sequence = 0x20  # начален SEQ номер
+        self.message_counter = 0x20  # NBL започва от 0x20
 
     # ---------------------- Поддръжка и избор на устройство ----------------------
 
     @classmethod
     def supported(cls, device):
-        """По аналогия с други драйвери – по желание може да се направи real probe.
-
-        Тук връщаме True, за да оставим откриването на ниво конфигурация.
-        """
+        """По желание тук може да се направи реално „probe“. Засега връщаме True."""
         return True
 
     @classmethod
@@ -170,350 +152,416 @@ class DatecsFiscalPrinterDriver(SerialDriver):
         ]
         return devices[0] if devices else None
 
-    # ---------------------- Вътрешни помощни методи (протокол) ----------------------
+    # ---------------------- Ниско ниво протокол ----------------------
 
-    def _ascii_hex_encode(self, value: int, length: int) -> bytes:
-        """Convert integer to ASCII-hex format as required by protocol"""
-        hex_str = f"{value:0{length}X}"
-        return bytes([ord(c) + 0x30 for c in hex_str])
+    def _calculate_checksum(self, data: bytes) -> bytes:
+        """XOR checksum, конвертиран в 2 ASCII байта (с +0x30 на nibble)."""
+        checksum = 0
+        for b in data:
+            checksum ^= b
 
-    def _ascii_hex_decode(self, data: bytes) -> int:
-        """Decode ASCII-hex format to integer"""
-        hex_str = ''.join([chr(b - 0x30) for b in data])
-        return int(hex_str, 16)
-
-    def _calculate_bcc(self, data: bytes) -> int:
-        """Calculate block check character (BCC) - simple sum"""
-        return sum(data) & 0xFFFF
+        high = ((checksum >> 4) & 0x0F) + 0x30
+        low = (checksum & 0x0F) + 0x30
+        return bytes([high, low])
 
     def _build_message(self, command: int, data: str = "") -> bytes:
         """
-        Build a complete message frame
-
-        Args:
-            command: Command code (0-255)
-            data: Command data string
-
-        Returns:
-            Complete message frame as bytes
+        Сглобява пълно съобщение:
+        STX(0x02) LEN NBL CMD DATA CS1 CS2 ETX(0x0A)
         """
-        data_bytes = data.encode('cp1251') if data else b''
+        data_bytes = data.encode('cp1251')
 
-        # Build message without BCC first
-        message_parts = [
-            self._ascii_hex_encode(len(data_bytes) + 10 + 0x20, 4),  # LEN
-            bytes([self.sequence]),  # SEQ
-            self._ascii_hex_encode(command, 4),  # CMD
-            data_bytes,  # DATA
-            b'\x05',  # PST
-        ]
+        length = 3 + len(data_bytes)             # LEN + NBL + CMD + DATA
+        len_byte = length + 0x20                 # според протокола
 
-        message_for_bcc = b''.join(message_parts)
+        nbl = self.message_counter
+        self.message_counter += 1
+        if self.message_counter > 0x9F:
+            self.message_counter = 0x20
 
-        # Calculate and append BCC
-        bcc = self._calculate_bcc(message_for_bcc)
-        message_parts.append(self._ascii_hex_encode(bcc, 4))
+        core = bytes([len_byte, nbl, command]) + data_bytes
 
-        # Complete message with preamble and terminator
-        complete_message = (
-            b'\x01' +          # PRE
-            b''.join(message_parts) +
-            b'\x03'            # EOT
-        )
+        checksum = self._calculate_checksum(core)
+        msg = b'\x02' + core + checksum + b'\x0A'
+        return msg
 
-        return complete_message
-
-    def _parse_response(self, response: bytes) -> DatecsResponse:
-        """
-        Parse response message from device
-        """
-        if len(response) < 15:
-            raise DatecsError("Response too short")
-
-        if response[0] != 0x01:
-            raise DatecsError("Invalid preamble")
-
-        if response[-1] != 0x03:
-            raise DatecsError("Invalid terminator")
-
-        # LEN и CMD в момента не ги ползваме, но ги държим за дебъг
-        _msg_len = self._ascii_hex_decode(response[1:5]) - 0x20
-        _cmd_echo = self._ascii_hex_decode(response[6:10])
-
-        # намираме позицията на SEP (0x04)
-        sep_pos = -1
-        for i in range(10, len(response) - 9):
-            if response[i] == 0x04:
-                sep_pos = i
-                break
-
-        if sep_pos == -1:
-            raise DatecsError("Separator not found")
-
-        data_bytes = response[10:sep_pos]
-        data_str = data_bytes.decode('cp1251') if data_bytes else ""
-
-        status_bytes = response[sep_pos + 1:sep_pos + 9]
-        status = FiscalDeviceStatus(status_bytes)
-
-        data_fields = data_str.split('\t') if data_str else []
-
-        error_code = 0
-        if data_fields:
-            try:
-                error_code = int(data_fields[0])
-            except (ValueError, IndexError):
-                error_code = 0
-
-        return DatecsResponse(
-            error_code=error_code,
-            data=data_fields[1:] if len(data_fields) > 1 else [],
-            status=status,
-            raw_message=response,
-        )
-
-    def _send_receive(self, message: bytes, retries: int = 3) -> bytes:
-        """
-        Изпраща съобщение към активната серијна връзка (self._connection)
-        и чете отговора.
-        """
+    def _send_message(self, message: bytes) -> bytes:
+        """Изпраща съобщението и получава отговор от self._connection."""
         if not self._connection or not self._connection.is_open:
-            raise DatecsError("Serial connection not open")
+            raise FiscalPrinterError("CONNECTION", "Not connected to printer")
 
-        for attempt in range(retries + 1):
+        try:
+            self._connection.write(message)
+            self._connection.flush()
+            # протоколът позволява до 1024 байта; тук четем с timeout от SerialProtocol
+            response = self._connection.read(1024)
+            return response
+        except Exception as e:  # noqa: BLE001
+            _logger.error("Tremol: communication error: %s", e)
+            raise FiscalPrinterError("COMMUNICATION", f"Communication failed: {e}") from e
+
+    def _parse_response(self, response: bytes) -> tuple[str, Optional[str]]:
+        """
+        Парсва отговор от фискалното устройство.
+        Връща (тип, данни) където тип е "ACK" или "DATA".
+        """
+        if len(response) < 7:
+            raise FiscalPrinterError("PROTOCOL", "Invalid response length")
+
+        first = response[0]
+
+        if first == 0x06:  # ACK
+            status1 = chr(response[2])
+            status2 = chr(response[3])
+            status_code = status1 + status2
+
+            if status_code != "30":
+                err_msg = ERROR_CODES.get(status1 + "0", "Unknown error")
+                cmd_msg = COMMAND_ERROR_CODES.get(status2 + "0", "Unknown command error")
+                raise FiscalPrinterError(status_code, f"{err_msg} / {cmd_msg}")
+
+            return "ACK", None
+
+        if first == 0x15:  # NACK
+            raise FiscalPrinterError("NACK", "Negative acknowledgment")
+
+        if first == 0x0E:  # RETRY
+            raise FiscalPrinterError("RETRY", "Device busy")
+
+        if first == 0x02:  # Data message
+            length = response[1] - 0x20
+            # nbl = response[2]
+            # cmd = response[3]
+            if length > 4:
+                data = response[4 : 4 + length - 3].decode('cp1251')
+                return "DATA", data
+            return "DATA", ""
+
+        raise FiscalPrinterError("PROTOCOL", "Unknown response type")
+
+    def _send_command(self, command: int, data: str = "") -> Optional[str]:
+        """
+        Изпраща команда с автоматичен retry при "RETRY" от устройството.
+        Връща данните от "DATA" отговор или None при чист ACK.
+        """
+        max_retries = 3
+
+        for attempt in range(max_retries):
             try:
-                self._connection.reset_input_buffer()
+                msg = self._build_message(command, data)
+                _logger.debug("Tremol: send cmd 0x%02X data=%s", command, data)
 
-                self._connection.write(message)
-                self._connection.flush()
+                response = self._send_message(msg)
+                resp_type, resp_data = self._parse_response(response)
 
-                response = b''
-                start_time = time.time()
+                if resp_type == "ACK":
+                    return None
+                if resp_type == "DATA":
+                    return resp_data
 
-                while True:
-                    if time.time() - start_time > self._protocol.timeout:
-                        if attempt == retries:
-                            raise DatecsTimeoutError("Response timeout")
-                        break
-
-                    if self._connection.in_waiting:
-                        chunk = self._connection.read(self._connection.in_waiting)
-                        response += chunk
-
-                        if response and response[-1] == 0x03:  # EOT
-                            return response
-
-                        if len(response) == 1:
-                            if response[0] == 0x15:  # NAK
-                                _logger.warning("Datecs: received NAK, retrying...")
-                                break
-                            if response[0] == 0x16:  # SYN
-                                start_time = time.time()
-                                response = b''
-                                continue
-
-                    time.sleep(0.001)
-
-                if attempt < retries:
-                    _logger.warning("Datecs: attempt %s failed, retrying...", attempt + 1)
+            except FiscalPrinterError as e:
+                if e.error_code == "RETRY" and attempt < max_retries - 1:
                     time.sleep(0.1)
+                    continue
+                raise
 
-            except serial.SerialException as e:
-                if attempt == retries:
-                    raise DatecsError(f"Serial communication error: {e}")
-                time.sleep(0.1)
+        raise FiscalPrinterError("RETRY", "Max retries exceeded")
 
-        raise DatecsError("Max retries exceeded")
+    # ---------------------- Базови операции ----------------------
 
-    def send_command(self, command: int, data: str = "") -> DatecsResponse:
-        """
-        Външен метод за изпращане на Datecs команда през текущото SerialDriver
-        съединение.
-        """
-        message = self._build_message(command, data)
-        _logger.debug("Datecs: sending command %02X: %s", command, data)
+    def check_status_quick(self) -> bytes:
+        """Бърз статус с unpacked команда 0x04."""
+        if not self._connection or not self._connection.is_open:
+            raise FiscalPrinterError("CONNECTION", "Not connected to printer")
 
-        response_bytes = self._send_receive(message)
-        response = self._parse_response(response_bytes)
+        try:
+            self._connection.write(b'\x04')
+            self._connection.flush()
+            return self._connection.read(1)
+        except Exception as e:  # noqa: BLE001
+            raise FiscalPrinterError("STATUS", f"Status check failed: {e}") from e
 
-        self.sequence += 1
-        if self.sequence > 0xFF:
-            self.sequence = 0x20
-
-        if response.error_code != 0:
-            _logger.warning("Datecs: command %02X returned error %s", command, response.error_code)
-
-        return response
-
-    # ---------------------- High-level API (фискални операции) ----------------------
-
-    def get_status(self) -> FiscalDeviceStatus:
-        """Връща текущия статус на устройството"""
+    def get_status(self) -> Dict[str, Any]:
+        """Детайлен статус (команда 0x20)."""
         with self._device_lock:
-            response = self.send_command(0x4A)  # Reading Status
-        return response.status
-
-    def get_device_info(self) -> Dict[str, str]:
-        """Информация за устройството (сер. номер, фискален номер и т.н.)"""
-        with self._device_lock:
-            response = self.send_command(0x7B, "1")  # Device Info
-
-        if response.error_code == 0 and len(response.data) >= 7:
+            resp = self._send_command(0x20)
+        if resp and len(resp) >= 14:
             return {
-                'serial_number': response.data[0],
-                'fiscal_number': response.data[1],
-                'header_line1': response.data[2],
-                'header_line2': response.data[3],
-                'tax_number': response.data[4],
-                'header_line3': response.data[5],
-                'header_line4': response.data[6],
+                'fm_read_only': bool(int(resp[0]) & 0x01),
+                'power_down_in_receipt': bool(int(resp[0]) & 0x02),
+                'printer_not_ready_overheat': bool(int(resp[0]) & 0x04),
             }
         return {}
 
+    def get_version(self) -> Dict[str, Any]:
+        """Информация за устройството (команда 0x21)."""
+        with self._device_lock:
+            resp = self._send_command(0x21)
+        if resp:
+            parts = resp.split(';')
+            if len(parts) >= 5:
+                return {
+                    'device_type': parts[0],
+                    'certificate_num': parts[1],
+                    'certificate_date': parts[2],
+                    'model': parts[3],
+                    'version': parts[4],
+                }
+        return {}
+
+    # ---------------------- Фискален бон ----------------------
+
     def open_receipt(
         self,
-        operator_code: int = 1,
-        operator_password: str = "1",
-        till_number: int = 1,
-        invoice: bool = False,
-    ) -> bool:
-        """Отваря фискален бон."""
-        invoice_flag = "I" if invoice else ""
-        data = f"{operator_code}\t{operator_password}\t{till_number}\t{invoice_flag}"
-
+        operator_num: str = "1",
+        operator_pass: str = "000000",
+        receipt_format: str = "1",
+        print_vat: str = "1",
+        print_type: str = "0",
+        unique_receipt_num: str = "",
+    ) -> None:
+        """Отваря фискален бон (команда 0x30)."""
+        data = f"{operator_num};{operator_pass};{receipt_format};{print_vat};{print_type}"
+        if unique_receipt_num:
+            data += f"${unique_receipt_num}"
         with self._device_lock:
-            response = self.send_command(0x30, data)
-        return response.error_code == 0
+            self._send_command(0x30, data)
 
-    def register_sale(
+    def sell_item(
         self,
         name: str,
-        tax_group: str,
+        vat_class: VATClass,
         price: float,
-        quantity: float = 1.0,
-        department: int = 0,
-    ) -> bool:
-        """Регистрация на продажба."""
-        tax_groups = {'A': 1, 'B': 2, 'C': 3, 'D': 4,
-                      'E': 5, 'F': 6, 'G': 7, 'H': 8}
-        tax_code = tax_groups.get(tax_group.upper(), 1)
-        data = f"{name}\t{tax_code}\t{price:.2f}\t{quantity:.3f}\t0\t\t{department}"
+        quantity: Optional[float] = None,
+        discount_percent: Optional[float] = None,
+        discount_value: Optional[float] = None,
+    ) -> None:
+        """Регистрация на продажба (команда 0x31)."""
+        name = name[:36]
+        data = f"{name};{vat_class.value};{price:.2f}"
+
+        if quantity is not None:
+            data += f"*{quantity:.3f}"
+        if discount_percent is not None:
+            data += f",{discount_percent:.2f}"
+        if discount_value is not None:
+            data += f":{discount_value:.2f}"
 
         with self._device_lock:
-            response = self.send_command(0x31, data)
-        return response.error_code == 0
+            self._send_command(0x31, data)
 
-    def subtotal(self, print_subtotal: bool = True) -> Optional[float]:
-        """Междинна сума."""
-        flag = "1" if print_subtotal else "0"
+    def subtotal(
+        self,
+        print_subtotal: bool = True,
+        display_subtotal: bool = True,
+        discount_value: Optional[float] = None,
+        discount_percent: Optional[float] = None,
+    ) -> float:
+        """Междинна сума (команда 0x33)."""
+        data = f"{'1' if print_subtotal else '0'};{'1' if display_subtotal else '0'}"
+        if discount_value is not None:
+            data += f":{discount_value:.2f}"
+        if discount_percent is not None:
+            data += f",{discount_percent:.2f}"
+
         with self._device_lock:
-            response = self.send_command(0x33, flag)
+            resp = self._send_command(0x33, data)
 
-        if response.error_code == 0 and len(response.data) >= 2:
+        if resp:
             try:
-                return float(response.data[1])
-            except (ValueError, IndexError):
+                return float(resp)
+            except ValueError:
                 pass
-        return None
+        return 0.0
 
-    def payment(self, payment_type: int = 0, amount: float = 0.0) -> bool:
-        """
-        Плащане.
-        payment_type: 0=брой, 1=карта и т.н.
-        amount: 0 за точна сума.
-        """
-        amount_str = f"{amount:.2f}" if amount > 0 else ""
-        data = f"{payment_type}\t{amount_str}"
-
+    def payment(
+        self,
+        payment_type: PaymentType = PaymentType.CASH,
+        amount: float = 0.0,
+        change_type: str = "0",
+        without_change: bool = False,
+    ) -> None:
+        """Плащане (команда 0x35)."""
+        change_option = "1" if without_change else "0"
+        data = f"{payment_type.value};{change_option};{amount:.2f}"
+        if not without_change:
+            data += f";{change_type}"
         with self._device_lock:
-            response = self.send_command(0x35, data)
-        return response.error_code == 0
+            self._send_command(0x35, data)
 
-    def close_receipt(self) -> bool:
-        """Затваряне на фискален бон."""
+    def cash_payment_and_close(self) -> None:
+        """Плащане в брой за точната сума и затваряне (0x36)."""
         with self._device_lock:
-            response = self.send_command(0x38)
-        return response.error_code == 0
+            self._send_command(0x36)
 
-    def cancel_receipt(self) -> bool:
-        """Отказ на фискален бон."""
+    def close_receipt(self) -> None:
+        """Затваряне на бон (0x38)."""
         with self._device_lock:
-            response = self.send_command(0x3C)
-        return response.error_code == 0
+            self._send_command(0x38)
 
-    def print_z_report(self) -> bool:
-        """Дневен Z отчет."""
+    def cancel_receipt(self) -> None:
+        """Отказ на бон (0x39)."""
         with self._device_lock:
-            response = self.send_command(0x45, "Z")
-        return response.error_code == 0
+            self._send_command(0x39)
 
-    def print_x_report(self) -> bool:
-        """Дневен X отчет."""
+    # ---------------------- Сервизни функции ----------------------
+
+    def print_daily_report(self, with_zeroing: bool = False) -> None:
+        """Дневен X/Z отчет (0x7C)."""
+        option = "Z" if with_zeroing else "X"
         with self._device_lock:
-            response = self.send_command(0x45, "X")
-        return response.error_code == 0
+            self._send_command(0x7C, option)
 
-    def set_date_time(self, datetime_str: str) -> bool:
-        """
-        Настройка на дата/час: "DD-MM-YY hh:mm:ss"
-        """
+    def print_text(self, text: str) -> None:
+        """Свободен текст (0x37)."""
         with self._device_lock:
-            response = self.send_command(0x3D, datetime_str)
-        return response.error_code == 0
+            self._send_command(0x37, text)
 
-    def get_date_time(self) -> Optional[str]:
-        """Връща текущата дата/час от устройството."""
+    def open_drawer(self) -> None:
+        """Отваряне на чекмедже (0x2A)."""
         with self._device_lock:
-            response = self.send_command(0x3E)
+            self._send_command(0x2A)
 
-        if response.error_code == 0 and response.data:
-            return response.data[0]
-        return None
+    def cut_paper(self) -> None:
+        """Отрязване на хартия (0x29)."""
+        with self._device_lock:
+            self._send_command(0x29)
+
+    def feed_paper(self) -> None:
+        """Придвижване на хартия една линия (0x2B)."""
+        with self._device_lock:
+            self._send_command(0x2B)
 
     # ---------------------- Примерен workflow ----------------------
 
-    def print_simple_receipt_example(self):
+    def print_simple_receipt_example(self) -> bool:
         """
-        Примерно използване от IoT страна – еднократен бон.
-        Извиква се през .action(), не чрез main().
+        Примерен бон: един артикул, плащане в брой.
+        Извиква се през IoT (action), не от main().
         """
         try:
-            # SerialDriver.action/ run вече се грижат за отварянето на порта,
-            # тук приемаме, че self._connection е наличен.
-            if not self.open_receipt(operator_code=1, operator_password="1"):
-                self._status['status'] = self.STATUS_ERROR
-                self._status['message_title'] = "Datecs: неуспешно отваряне на бон"
-                return
-
-            if not self.register_sale("Хляб", "B", 2.50, 1.0):
-                self._status['status'] = self.STATUS_ERROR
-                self._status['message_title'] = "Datecs: неуспешна регистрация на артикул Хляб"
-                return
-
+            self.open_receipt("1", "000000")
+            self.sell_item("Тестов артикул", VATClass.VAT_A, 10.00, quantity=1.0)
             subtotal = self.subtotal()
-            _logger.info("Datecs: междинна сума: %s", subtotal)
-
-            if not self.payment(payment_type=0, amount=0.0):
-                self._status['status'] = self.STATUS_ERROR
-                self._status['message_title'] = "Datecs: неуспешно плащане"
-                return
-
-            if not self.close_receipt():
-                self._status['status'] = self.STATUS_ERROR
-                self._status['message_title'] = "Datecs: неуспешно затваряне на бона"
-                return
-
+            _logger.info("Tremol: междинна сума: %.2f", subtotal)
+            self.cash_payment_and_close()
             self._status['status'] = self.STATUS_CONNECTED
-
-        except DatecsError as e:
-            _logger.error("Datecs грешка: %s", e)
+            return True
+        except FiscalPrinterError as e:
+            _logger.error("Tremol: фискална грешка: %s", e)
             try:
                 self.cancel_receipt()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
             self._status['status'] = self.STATUS_ERROR
             self._status['message_title'] = str(e)
+            return False
         except Exception as e:  # noqa: BLE001
-            _logger.exception("Неочаквана грешка при печат на бон (Datecs)")
+            _logger.exception("Tremol: неочаквана грешка при печат")
             self._status['status'] = self.STATUS_ERROR
             self._status['message_title'] = str(e)
+            return False
+
+
+# ====================== Tremol ISL драйвер върху базовия ISL ======================
+
+TremolIslProtocol = SerialProtocol(
+    name='Tremol ISL',
+    baudrate=115200,
+    bytesize=serial.EIGHTBITS,
+    stopbits=serial.STOPBITS_ONE,
+    parity=serial.PARITY_NONE,
+    timeout=5,
+    writeTimeout=1,
+    measureRegexp=None,
+    statusRegexp=None,
+    commandTerminator=b'',
+    commandDelay=0.1,
+    measureDelay=0.1,
+    newMeasureDelay=0.2,
+    measureCommand=b'',
+    emptyAnswerValid=False,
+)
+
+
+class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
+    """
+    ISL-базиран IoT драйвер за Tremol.
+
+    - Наследява общия IslFiscalPrinterBase;
+    - Ниско ниво `_isl_request` ще използва Tremol‑подобен фрейминг
+      (STX/LEN/NBL/CMD/DATA/CS/ETX) – TODO;
+    - Тук са само Tremol‑специфичните mapping-и (TaxGroup, PaymentType и др.).
+    """
+
+    _protocol = TremolIslProtocol
+    device_type = "fiscal_printer"
+
+    def __init__(self, identifier, device):
+        super().__init__(identifier, device)
+        self.info = IslDeviceInfo(
+            manufacturer="Tremol",
+            model="Tremol ISL",
+            comment_text_max_length=40,
+            item_text_max_length=36,
+            operator_password_max_length=6,
+        )
+        self.options.update(
+            {
+                "Operator.ID": "1",
+                "Operator.Password": "000000",
+            }
+        )
+
+    # ---------------------- Ниско ниво ISL ----------------------
+
+    def _isl_request(self, command: int, data: str = "") -> tuple[str, DeviceStatus, bytes]:
+        """
+        Ниско ниво ISL заявка за Tremol.
+
+        TODO:
+          - изграждане на Tremol frame за `command` и `data`
+            (STX/LEN/NBL/CMD/DATA/CS/ETX);
+          - изпращане през self._connection;
+          - четене на отговор, парсване на ASCII payload и статус байтове (ако има);
+          - конвертиране на статусите към DeviceStatus.
+
+        В момента е placeholder.
+        """
+        raise NotImplementedError("Имплементирай Tremol ISL протокола тук")
+
+    # ---------------------- Tax groups / payments ----------------------
+
+    def get_tax_group_text(self, tax_group: TaxGroup) -> str:
+        """
+        Tremol VAT класове A..H – мапваме от TaxGroup1..8.
+        """
+        mapping = {
+            TaxGroup.TaxGroup1: "A",
+            TaxGroup.TaxGroup2: "B",
+            TaxGroup.TaxGroup3: "C",
+            TaxGroup.TaxGroup4: "D",
+            TaxGroup.TaxGroup5: "E",
+            TaxGroup.TaxGroup6: "F",
+            TaxGroup.TaxGroup7: "G",
+            TaxGroup.TaxGroup8: "H",
+        }
+        if tax_group not in mapping:
+            raise ValueError(f"Unsupported tax group for Tremol ISL: {tax_group}")
+        return mapping[tax_group]
+
+    def get_payment_type_mappings(self) -> Dict[IslPaymentType, str]:
+        """
+        Типичен Tremol mapping за ISL‑стил плащания:
+
+        - Cash  -> "P"
+        - Card  -> "C"
+        - Check -> "N"
+        - Reserved1 -> "D"
+        """
+        return {
+            IslPaymentType.CASH: "P",
+            IslPaymentType.CARD: "C",
+            IslPaymentType.CHECK: "N",
+            IslPaymentType.RESERVED1: "D",
+        }

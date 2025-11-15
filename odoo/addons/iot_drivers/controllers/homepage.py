@@ -308,6 +308,60 @@ class IotBoxOwlHomePage(http.Controller):
             _logger.exception("Error revoking certificate")
             return {'status': 'error', 'message': str(e)}
 
+    @route.iot_route('/iot_drivers/netfp_printer', type='http', cors='*')
+    def get_netfp_printer(self):
+        """
+        GET: текущият Net.FP принтер + списък налични принтери.
+
+        Формат:
+        {
+          "current": "<printerId>|" or "",
+          "printers": [
+             {"id": "<printerId>", "name": "<label>"},
+             ...
+          ]
+        }
+
+        printerId по подразбиране е serial_number (ако има), иначе device_identifier.
+        """
+
+        current = system.get_conf('netfp_printer_id') or ""
+
+        printers = []
+        for dev in iot_devices.values():
+            info = getattr(dev, "info", None)
+            serial = getattr(info, "serial_number", None) or getattr(info, "SerialNumber", None)
+            name = getattr(dev, "device_name", getattr(dev, "name", "")) or serial or dev.device_identifier
+            printer_id = (serial or dev.device_identifier or "").lower()
+            printers.append(
+                {
+                    "id": printer_id,
+                    "name": f"{name} ({printer_id})",
+                }
+            )
+
+        return json.dumps(
+            {
+                "current": current,
+                "printers": printers,
+            }
+        )
+
+    @route.iot_route('/iot_drivers/netfp_printer', type='jsonrpc', methods=['POST'], cors='*')
+    def set_netfp_printer(self, printer_id=None):
+        """
+        POST (jsonrpc): задава/изчиства Net.FP принтер ID.
+
+        params: { "printer_id": "<id>|null" }
+        """
+        # Празно или None → изчистваме конфигурацията
+        pid = (printer_id or "").strip()
+        system.update_conf({'netfp_printer_id': pid})
+        return {
+            'status': 'success',
+            'printer_id': pid,
+        }
+
     # ---------------------------------------------------------- #
     # GET methods                                                #
     # -> Always use json.dumps() to return a JSON response       #
