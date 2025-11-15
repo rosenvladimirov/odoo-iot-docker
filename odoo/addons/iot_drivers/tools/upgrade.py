@@ -9,11 +9,11 @@ from odoo.addons.iot_drivers.tools.helpers import (
     toggleable,
 )
 from odoo.addons.iot_drivers.tools.system import (
-    rpi_only,
     IS_TEST,
     git,
     pip,
     path_file,
+    IS_DOCKER,
 )
 
 _logger = logging.getLogger(__name__)
@@ -42,15 +42,17 @@ def get_db_branch(server_url):
 @require_db
 def check_git_branch(server_url=None, force=False):
     """Update the Odoo code using git to match the branch of the connected database.
-    This method will also update the Python requirements and system packages, based
-    on requirements.txt and packages.txt files.
 
-    If the database cannot be reached, we fetch the last changes from the current branch.
+    В Docker официалните update-и се правят чрез нов image, така че тук
+    няма да правим нищо (освен лог).
 
-    :param server_url: The URL of the connected Odoo database (provided by decorator).
-    :param force: check out even if the db's branch matches the current one
+    Ако не сме в Docker, работи както оригинала (git checkout + pip).
     """
     if IS_TEST:
+        return
+
+    if IS_DOCKER:
+        _logger.info("check_git_branch skipped in Docker environment (updates via image).")
         return
 
     try:
@@ -71,11 +73,8 @@ def check_git_branch(server_url=None, force=False):
         checkout(target_branch)
         update_requirements()
 
-        # System updates
-        update_packages()
+        # RPi/barebone system updates (apt, ramdisk, ... ) са премахнати
 
-        # Miscellaneous updates (version migrations)
-        misc_migration_updates()
         _logger.warning("Update completed, restarting...")
         odoo_restart()
     except Exception:
@@ -116,7 +115,7 @@ def checkout(branch, remote=None):
 
 
 def update_requirements():
-    """Update the Python requirements of the IoT Box, installing the ones
+    """Update the Python requirements of the IoT environment, installing the ones
     listed in the requirements.txt file.
     """
     requirements_file = path_file('odoo', 'addons', 'iot_box_image', 'configuration', 'requirements.txt')
@@ -128,55 +127,17 @@ def update_requirements():
     pip('-r', requirements_file)
 
 
-@rpi_only
 def update_packages():
-    """Update apt packages on the IoT Box, installing the ones listed in
-    the packages.txt file.
-    Requires ``writable`` context manager.
+    """NO-OP.
+
+    Оригинално: apt update/upgrade в barebone image. В Docker не го правим.
     """
-    packages_file = path_file('odoo', 'addons', 'iot_box_image', 'configuration', 'packages.txt')
-    if not packages_file.exists():
-        _logger.info("No packages file found, not updating.")
-        return
-
-    # update and install packages in the foreground
-    commands = (
-        "export DEBIAN_FRONTEND=noninteractive && "
-        "mount -t proc proc /proc && "
-        "apt-get update && "
-        f"xargs apt-get -y -o Dpkg::Options::='--force-confdef' -o Dpkg::Options::='--force-confold' install < {packages_file}"
-    )
-    _logger.warning("Updating apt packages")
-    if subprocess.run(
-        f'sudo chroot /root_bypass_ramdisks /bin/bash -c "{commands}"', shell=True, check=False
-    ).returncode != 0:
-        _logger.error("An error occurred while trying to update the packages")
-        return
-
-    # upgrade and remove packages in the background
-    background_cmd = 'chroot /root_bypass_ramdisks /bin/bash -c "apt-get upgrade -y && apt-get -y autoremove"'
-    subprocess.Popen(["sudo", "bash", "-c", background_cmd], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    _logger.info("update_packages skipped (barebone/RPi logic removed).")
 
 
-@rpi_only
 def misc_migration_updates():
-    """Run miscellaneous updates after the code update."""
-    _logger.warning("Running version migration updates")
+    """NO-OP.
 
-    if path_file('odoo', 'addons', 'hw_drivers').exists():
-        # TODO: remove this when v18.4 is deprecated (hw_drivers/,hw_posbox_homepage/ -> iot_drivers/)
-        subprocess.run(
-            ['sed', '-i', 's|iot_drivers|hw_drivers,hw_posbox_homepage|g', '/home/pi/odoo.conf'], check=False
-        )
-
-    # if ramdisk.service points to `setup/iot_box_builder`, we symlink it to
-    # `iot_box_image` or `point_of_sale/tools/posbox` instead
-    iot_box_builder_path = path_file('odoo', 'setup', 'iot_box_builder')
-    iot_box_image_path = path_file('odoo', 'addons', 'iot_box_image', 'configuration')
-    point_of_sale_path = path_file('odoo', 'addons', 'point_of_sale', 'tools', 'posbox', 'configuration')
-    iot_box_builder_path.mkdir(parents=True, exist_ok=True)
-    iot_box_builder_path /= "configuration"
-    if iot_box_image_path.exists():  # images <= v19.1
-        iot_box_builder_path.symlink_to(iot_box_image_path)
-    elif point_of_sale_path.exists():  # images before <=v18.0
-        iot_box_builder_path.symlink_to(point_of_sale_path)
+    Оригинално: разни миграции за ramdisk/старите IoT images. В Docker не се ползва.
+    """
+    _logger.info("misc_migration_updates skipped (barebone/RPi logic removed).")

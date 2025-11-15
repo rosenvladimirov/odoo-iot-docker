@@ -1,6 +1,17 @@
 """
 WiFi management за Docker environment
-Използва NetworkManager през DBus API вместо nmcli със sudo
+Използва NetworkManager през DBus API вместо nmcli със sudo.
+
+Поддържа същия публичен API като оригиналния модул, за да не се чупят
+контролери и фронтенд:
+    - get_current
+    - get_available_ssids
+    - is_current
+    - reconnect
+    - disconnect
+    - is_access_point
+    - get_access_point_ssid
+    - generate_network_qr_codes
 """
 
 import base64
@@ -58,10 +69,9 @@ if IS_DOCKER:
 
     except ImportError:
         _logger.warning("dbus-python not installed - WiFi management disabled")
-    except dbus.exceptions.DBusException as e:
-        _logger.warning("Cannot connect to NetworkManager DBus: %s", e)
     except Exception as e:
-        _logger.warning("Unexpected error initializing DBus: %s", e)
+        # Не използваме dbus.exceptions директно, ако import не е минал
+        _logger.warning("Cannot connect to NetworkManager DBus: %s", e)
 
 
 # ============================================
@@ -84,7 +94,6 @@ class NetworkManagerDBus:
         self.bus = _dbus.SystemBus()
         self.nm_proxy = self.bus.get_object(self.NM_SERVICE, self.NM_PATH)
         self.nm = _dbus.Interface(self.nm_proxy, self.NM_SERVICE)
-        self.nm_props = _dbus.Interface(self.nm_proxy, 'org.freedesktop.DBus.Properties')
 
     def get_wifi_device_path(self):
         """Get WiFi device path"""
@@ -98,7 +107,7 @@ class NetworkManagerDBus:
                 if device_type == self.DEVICE_TYPE_WIFI:
                     return device_path
             return None
-        except _dbus.exceptions.DBusException as e:
+        except Exception as e:
             _logger.error("Error getting WiFi device: %s", e)
             return None
 
@@ -119,8 +128,9 @@ class NetworkManagerDBus:
             try:
                 wifi_iface.RequestScan({})
                 time.sleep(1)  # Wait for scan to complete
-            except _dbus.exceptions.DBusException:
-                pass  # Scan may be in progress
+            except Exception:
+                # Scan може да е в прогрес
+                pass
 
             # Get access points
             access_points = wifi_iface.GetAccessPoints()
@@ -167,7 +177,7 @@ class NetworkManagerDBus:
             # Sort by signal strength
             return sorted(networks, key=lambda x: x['strength'], reverse=True)
 
-        except _dbus.exceptions.DBusException as e:
+        except Exception as e:
             _logger.error("Error scanning networks: %s", e)
             return []
 
@@ -212,7 +222,7 @@ class NetworkManagerDBus:
 
             return bytes(ssid_bytes).decode('utf-8', errors='ignore')
 
-        except _dbus.exceptions.DBusException as e:
+        except Exception as e:
             _logger.debug("Error getting current connection: %s", e)
             return None
 
@@ -255,7 +265,8 @@ class NetworkManagerDBus:
             connection_path = settings_iface.AddConnection(connection_settings)
 
             # Activate connection
-            self.nm.ActivateConnection(
+            nm = _dbus.Interface(self.nm_proxy, self.NM_SERVICE)
+            nm.ActivateConnection(
                 connection_path,
                 device_path,
                 _dbus.ObjectPath('/')
@@ -266,7 +277,7 @@ class NetworkManagerDBus:
 
             return self.get_current_connection() == ssid
 
-        except _dbus.exceptions.DBusException as e:
+        except Exception as e:
             _logger.error("Error connecting to %s: %s", ssid, e)
             return False
 
@@ -286,7 +297,7 @@ class NetworkManagerDBus:
             device_iface.Disconnect()
             return True
 
-        except _dbus.exceptions.DBusException as e:
+        except Exception as e:
             _logger.error("Error disconnecting: %s", e)
             return False
 
@@ -452,7 +463,7 @@ def get_access_point_ssid():
 
     Access point mode is not supported in Docker.
 
-    :return: Default SSID (not functional)
+    :return: Default SSID (нефункционален placeholder)
     :rtype: str
     """
     system = _get_system()
@@ -481,7 +492,7 @@ def generate_qr_code_image(qr_code_data):
         qr.add_data(qr_code_data)
         qr.make(fit=True)
 
-        img = qr.make_image(fill_color="black", back_color="white")
+        img = qr.make_image(fill_color="black", back_color="transparent")
         buffered = BytesIO()
         img.save(buffered, format="PNG")
         img_base64 = base64.b64encode(buffered.getvalue()).decode()
@@ -508,7 +519,8 @@ def generate_network_qr_codes():
     # URL QR code
     ip = system.get_ip()
     if ip:
-        url_data = f"https://{ip}"
+        # В оригинала беше http://<ip>, в Docker често си зад reverse proxy (https)
+        url_data = f"http://{ip}"
         qr_code_images['qr_url'] = generate_qr_code_image(url_data)
 
     # WiFi QR code (only if connected)
@@ -516,11 +528,12 @@ def generate_network_qr_codes():
         wifi_ssid = system.get_conf('wifi_ssid')
         wifi_password = system.get_conf('wifi_password')
 
-        if wifi_ssid:
-            # Only include password in QR if it exists and user wants it
-            # For security, we don't include password by default
-            wifi_data = f"WIFI:S:{wifi_ssid};T:WPA;P:;;"
+        if wifi_ssid and wifi_password:
+            wifi_data = f"WIFI:S:{wifi_ssid};T:WPA;P:{wifi_password};;;"
             qr_code_images['qr_wifi'] = generate_qr_code_image(wifi_data)
+    else:
+        access_point_data = f"WIFI:S:{get_access_point_ssid()};T:nopass;;;"
+        qr_code_images['qr_wifi'] = generate_qr_code_image(access_point_data)
 
     return qr_code_images
 
@@ -532,8 +545,8 @@ def generate_network_qr_codes():
 def _validate_configuration(ssid):
     """Validate WiFi configuration
 
-    In Docker, configuration is handled by NetworkManager.
-    RaspberryPi ramdisk operations are not applicable.
+    В Docker няма ramdisk / root_bypass_ramdisks, така че няма какво
+    да валидираме. Държим функцията за съвместимост.
 
     :param str ssid: SSID (ignored)
     :return: Always True
@@ -580,7 +593,7 @@ def _scan_network():
 def _reload_network_manager():
     """Reload NetworkManager
 
-    Not needed with DBus API.
+    Не е нужен с DBus API – държим stub за съвместимост.
 
     :return: True
     :rtype: bool
@@ -599,7 +612,7 @@ if IS_DOCKER:
         _logger.warning(
             "WiFi management DISABLED - NetworkManager DBus not available\n"
             "To enable WiFi management:\n"
-            "  1. Install dbus-python: pip install dbus-python\n"
+            "  1. Install dbus-python in the system image\n"
             "  2. Mount DBus socket: -v /var/run/dbus:/var/run/dbus:ro\n"
             "  3. Add capabilities: --cap-add=NET_ADMIN --cap-add=NET_RAW\n"
             "  4. Use host network: --network=host"

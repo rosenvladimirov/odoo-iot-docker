@@ -4,3 +4,4 @@ from . import driver
 from . import proxy
 from . import homepage
 from . import certificate
+from . import eta_controller

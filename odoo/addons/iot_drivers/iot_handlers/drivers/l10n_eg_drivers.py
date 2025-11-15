@@ -1,134 +1,195 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 import base64
-import json
 import logging
+import os
+
 import PyKCS11
-
-from passlib.context import CryptContext
-
-from odoo import http
 from odoo.tools.config import config
-from odoo.addons.iot_drivers.tools import route
-from odoo.addons.iot_drivers.tools.system import IOT_SYSTEM, IS_RPI, IS_WINDOWS
 
 _logger = logging.getLogger(__name__)
 
-crypt_context = CryptContext(schemes=['pbkdf2_sha512'])
 
+class UsbTokenService:
+    """Сервизен слой за работа с USB токена (SafeNet / Gemalto през PKCS#11).
 
-class EtaUsbController(http.Controller):
+    Отговаря за:
+    - зареждане на PKCS#11 библиотеката (OpenSC или vendor специфична),
+    - отваряне и затваряне на сесия,
+    - четене на сертификат,
+    - подписване.
+    """
 
-    def _is_access_token_valid(self, access_token):
-        stored_hash = config.get('proxy_access_token')
-        if not stored_hash:
-            # empty password/hash => authentication forbidden
-            return False
-        return crypt_context.verify(access_token, stored_hash)
+    def __init__(self):
+        configured_lib = config.get('pkcs11_lib_path') or os.environ.get('PKCS11_LIB_PATH')
+        # по подразбиране: стандартен път за OpenSC на x86_64 Debian/Ubuntu
+        self.pkcs11_lib_path = configured_lib or '/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so'
 
-    @route.iot_route('/hw_l10n_eg_eta/certificate', type='http', cors='*', csrf=False, methods=['POST'])
-    def eta_certificate(self, pin, access_token):
-        """Gets the certificate from the token and returns it to the main odoo instance so that we can prepare the
-        cades-bes object on the main odoo instance rather than this middleware
+    # ---------- вътрешни помощни методи ----------
 
-        :param pin: pin of the token
-        :param access_token: token shared with the main odoo instance
-        :return: json object with the certificate
-        """
-        if not self._is_access_token_valid(access_token):
-            return self._get_error_template('unauthorized')
-        session, error = self._get_session(pin)
-        if error:
-            return error
+    def _load_lib(self):
+        if not self.pkcs11_lib_path:
+            raise RuntimeError('pkcs11_lib_path_not_configured')
+        pkcs11 = PyKCS11.PyKCS11Lib()
         try:
-            cert = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])[0]
-            cert_bytes = bytes(session.getAttributeValue(cert, [PyKCS11.CKA_VALUE])[0])
-            payload = {
-                'certificate': base64.b64encode(cert_bytes).decode()
-            }
-            return json.dumps(payload)
-        except Exception as ex:
-            _logger.exception('Error while getting ETA certificate')
-            return self._get_error_template(str(ex))
-        finally:
-            session.logout()
-            session.closeSession()
+            pkcs11.load(pkcs11dll_filename=self.pkcs11_lib_path)
+        except PyKCS11.PyKCS11Error as ex:
+            _logger.exception("Cannot load PKCS#11 library at %s", self.pkcs11_lib_path)
+            raise RuntimeError(f'pkcs11_library_load_failed: {ex}') from ex
+        return pkcs11
 
-    @route.iot_route('/hw_l10n_eg_eta/sign', type='http', cors='*', csrf=False, methods=['POST'])
-    def eta_sign(self, pin, access_token, invoices):
-        """Check if the access_token is valid and sign the invoices accessing the usb key with the pin.
-
-        :param pin: pin of the token
-        :param access_token: token shared with the main odoo instance
-        :param invoices: dictionary of invoices. Keys are invoices ids, value are the base64 encoded binaries to sign
-        :return: json object with the signed invoices
-        """
-        if not self._is_access_token_valid(access_token):
-            return self._get_error_template('unauthorized')
-        session, error = self._get_session(pin)
-        if error:
-            return error
-        try:
-            cert = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])[0]
-            cert_id = session.getAttributeValue(cert, [PyKCS11.CKA_ID])[0]
-            priv_key = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY), (PyKCS11.CKA_ID, cert_id)])[0]
-
-            invoice_dict = dict()
-            invoices = json.loads(invoices)
-            for invoice, eta_inv in invoices.items():
-                to_sign = base64.b64decode(eta_inv)
-                signed_data = session.sign(priv_key, to_sign, PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS))
-                invoice_dict[invoice] = base64.b64encode(bytes(signed_data)).decode()
-
-            payload = {
-                'invoices': json.dumps(invoice_dict),
-            }
-            return json.dumps(payload)
-        except Exception as ex:
-            _logger.exception('Error while signing invoices')
-            return self._get_error_template(str(ex))
-        finally:
-            session.logout()
-            session.closeSession()
-
-    def _get_session(self, pin):
-        session = False
-
-        lib, error = self.get_crypto_lib()
-        if error:
-            return session, error
-
-        try:
-            pkcs11 = PyKCS11.PyKCS11Lib()
-            pkcs11.load(pkcs11dll_filename=lib)
-        except PyKCS11.PyKCS11Error:
-            return session, self._get_error_template('missing_dll')
-
+    def _open_session(self, pin):
+        """Отваря сесия към точно един токен и прави login с PIN."""
+        pkcs11 = self._load_lib()
         slots = pkcs11.getSlotList(tokenPresent=True)
         if not slots:
-            return session, self._get_error_template('no_drive')
+            raise RuntimeError('no_drive: Не е открит USB подписващ токен.')
         if len(slots) > 1:
-            return session, self._get_error_template('multiple_drive')
+            raise RuntimeError('multiple_drive: Открити са повече от един USB токен. Моля, оставете само един свързан.')
 
         try:
-            session = pkcs11.openSession(slots[0], PyKCS11.CKF_SERIAL_SESSION | PyKCS11.CKF_RW_SESSION)
+            session = pkcs11.openSession(
+                slots[0],
+                PyKCS11.CKF_SERIAL_SESSION | PyKCS11.CKF_RW_SESSION,
+            )
             session.login(pin)
+        except PyKCS11.PyKCS11Error as ex:
+            _logger.exception("Error while opening PKCS#11 session / login")
+            raise RuntimeError(f'login_failed: {ex}') from ex
+        return session
+
+    # ---------- публични методи за контролерите ----------
+
+    def get_certificate_info(self, pin):
+        """Връща dict с информация за сертификата + самия сертификат в base64.
+
+        {
+            'certificate': '<b64>',
+            'label': '<стринг>',
+            'id_hex': '<HEX>',
+        }
+        """
+        session = None
+        try:
+            session = self._open_session(pin)
+            cert_objects = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])
+            if not cert_objects:
+                raise RuntimeError('no_certificate: Не е открит сертификат в токена.')
+
+            cert = cert_objects[0]
+            value, label, cert_id = session.getAttributeValue(
+                cert,
+                [PyKCS11.CKA_VALUE, PyKCS11.CKA_LABEL, PyKCS11.CKA_ID],
+            )
+            cert_bytes = bytes(value)
+            cert_b64 = base64.b64encode(cert_bytes).decode()
+            label_str = ''.join(chr(c) for c in label) if label else ''
+            id_hex = ''.join(f'{b:02X}' for b in cert_id) if cert_id else ''
+
+            return {
+                'certificate': cert_b64,
+                'label': label_str,
+                'id_hex': id_hex,
+            }
+        finally:
+            if session:
+                try:
+                    session.logout()
+                except Exception:  # noqa: BLE001
+                    _logger.debug("Error during PKCS#11 logout", exc_info=True)
+                try:
+                    session.closeSession()
+                except Exception:
+                    _logger.debug("Error during PKCS#11 session close", exc_info=True)
+
+    def sign_invoices(self, pin, invoices_dict):
+        """Подписва множество фактури.
+
+        :param invoices_dict: {invoice_id: base64_to_sign}
+        :return: {invoice_id: base64_signed}
+        """
+        session = None
+        try:
+            session = self._open_session(pin)
+
+            cert_objects = session.findObjects([(PyKCS11.CKA_CLASS, PyKCS11.CKO_CERTIFICATE)])
+            if not cert_objects:
+                raise RuntimeError('no_certificate: Не е открит сертификат в токена.')
+
+            cert = cert_objects[0]
+            cert_id = session.getAttributeValue(cert, [PyKCS11.CKA_ID])[0]
+
+            priv_keys = session.findObjects(
+                [
+                    (PyKCS11.CKA_CLASS, PyKCS11.CKO_PRIVATE_KEY),
+                    (PyKCS11.CKA_ID, cert_id),
+                ]
+            )
+            if not priv_keys:
+                raise RuntimeError('no_private_key: Не е открит частен ключ за сертификата.')
+
+            priv_key = priv_keys[0]
+
+            result = {}
+            for invoice_id, payload_b64 in invoices_dict.items():
+                to_sign = base64.b64decode(payload_b64)
+                signed_data = session.sign(
+                    priv_key,
+                    to_sign,
+                    PyKCS11.Mechanism(PyKCS11.CKM_SHA256_RSA_PKCS),
+                )
+                result[invoice_id] = base64.b64encode(bytes(signed_data)).decode()
+            return result
+        finally:
+            if session:
+                try:
+                    session.logout()
+                except Exception:  # noqa: BLE001
+                    _logger.debug("Error during PKCS#11 logout", exc_info=True)
+                try:
+                    session.closeSession()
+                except Exception:
+                    _logger.debug("Error during PKCS#11 session close", exc_info=True)
+
+    def quick_status(self, pin=None):
+        """Лек статус за UI.
+
+        - без PIN: проверява дали има токен и колко;
+        - с PIN: опитва да прочете сертификата.
+        """
+        try:
+            if not pin:
+                pkcs11 = self._load_lib()
+                slots = pkcs11.getSlotList(tokenPresent=True)
+                if not slots:
+                    return {
+                        'status': 'no_token',
+                        'message': 'Не е открит USB подписващ токен.',
+                    }
+                if len(slots) > 1:
+                    return {
+                        'status': 'multiple_tokens',
+                        'message': 'Открити са повече от един USB токен. Моля, оставете само един свързан.',
+                    }
+                return {
+                    'status': 'token_present',
+                    'message': 'Открит е USB токен. Въведете PIN, за да проверите сертификата.',
+                }
+
+            info = self.get_certificate_info(pin)
+            return {
+                'status': 'ok',
+                'message': 'USB токенът е достъпен и сертификатът е прочетен успешно.',
+                'certificate_label': info.get('label'),
+                'certificate_id': info.get('id_hex'),
+            }
+        except RuntimeError as ex:
+            return {
+                'status': 'error',
+                'message': str(ex),
+            }
         except Exception as ex:  # noqa: BLE001
-            error = self._get_error_template(str(ex))
-        return session, error
-
-    def get_crypto_lib(self):
-        error = lib = False
-        if IOT_SYSTEM == 'Darwin':
-            lib = '/Library/OpenSC/lib/onepin-opensc-pkcs11.so'
-        elif IS_RPI:
-            lib = '/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so'
-        elif IS_WINDOWS:
-            lib = 'C:/Windows/System32/eps2003csp11.dll'
-        else:
-            error = self._get_error_template('unsupported_system')
-        return lib, error
-
-    def _get_error_template(self, error_str):
-        return json.dumps({
-            'error': error_str,
-        })
+            _logger.exception("Unexpected error during quick_status")
+            return {
+                'status': 'error',
+                'message': f'unexpected_error: {ex}',
+            }

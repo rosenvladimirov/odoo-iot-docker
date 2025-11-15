@@ -1,161 +1,302 @@
-import datetime
-import logging
-import requests
-from cryptography import x509
-from cryptography.x509.oid import NameOID
-from pathlib import Path
+"""Operating system-related utilities for the IoT"""
 
-from odoo.addons.iot_drivers.tools import system
-from odoo.addons.iot_drivers.tools.system import (
-    IS_RPI,
-    IS_TEST,
-    IS_WINDOWS,
-    IOT_IDENTIFIER,
-)
-from odoo.addons.iot_drivers.tools.helpers import (
-    odoo_restart,
-    require_db,
-)
+import configparser
+import logging
+import netifaces
+import os
+import requests
+import secrets
+import socket
+import subprocess
+import sys
+import time
+
+from functools import cache
+from pathlib import Path
+from platform import system as _platform_system, release
+
+from odoo import release as odoo_release
 
 _logger = logging.getLogger(__name__)
 
 
-@require_db
-def ensure_validity():
-    """Ensure certificate validity
+# ---------------------------------------------------------- #
+# Platform detection & Docker flag                           #
+# ---------------------------------------------------------- #
 
-    In Docker, certificates are managed by Traefik.
-    This function informs the database about certificate status.
+IOT_SYSTEM = _platform_system()
+
+# Docker detection (по env променлива)
+IS_DOCKER = os.environ.get('IOT_IN_DOCKER', 'false').lower() == 'true'
+
+IOT_WINDOWS_CHAR, IOT_TEST_CHAR = "W", "T"
+
+IS_WINDOWS = IOT_SYSTEM[0] == IOT_WINDOWS_CHAR
+IS_TEST = not IS_WINDOWS
+"""IoT system "Test" correspond to any non-Windows system.
+Очаквано: Linux (вкл. Docker) или macOS за dev цели."""
+
+IOT_CHAR = IOT_WINDOWS_CHAR if IS_WINDOWS else IOT_TEST_CHAR
+"""IoT system character used in the identifier and version.
+- 'W' for Windows
+- 'T' for Test (Linux/Docker и др.)"""
+
+
+def path_file(*args) -> Path:
+    """Return the path to the file from project root (parent of sys.path[0])."""
+    return Path(sys.path[0]).parent.joinpath(*args)
+
+
+def git(*args):
+    """Run a git command with the given arguments, taking system
+    into account.
+
+    :param args: list of arguments to pass to git
     """
-    if system.IS_DOCKER:
-        _logger.info("Certificates managed by Traefik in Docker mode")
-        # Still inform database if certificate exists
-        cert_end_date = get_certificate_end_date()
-        if cert_end_date:
-            inform_database(cert_end_date)
-        return
+    git_executable = 'git' if not IS_WINDOWS else path_file('git', 'cmd', 'git.exe')
+    command = [git_executable, f'--work-tree={path_file("odoo")}', f'--git-dir={path_file("odoo", ".git")}', *args]
 
-    # Original logic for non-Docker
-    inform_database(get_certificate_end_date() or download_odoo_certificate())
+    p = subprocess.run(command, stdout=subprocess.PIPE, text=True, check=False)
+    if p.returncode == 0:
+        return p.stdout.strip()
+    return None
 
 
-def get_certificate_end_date():
-    """Check certificate validity"""
-    if system.IS_DOCKER:
-        # Check Traefik-managed certificate
-        cert_path = Path('/app/certs/cert.pem')
+def pip(*args):
+    """Run a pip install command with the given arguments.
+
+    :param args: list of arguments to pass to pip install
+    :return: True if the command was successful, False otherwise
+    """
+    python_executable = [] if not IS_WINDOWS else [path_file('python', 'python.exe'), '-m']
+    command = [*python_executable, 'pip', 'install', *args]
+
+    p = subprocess.run(command, stdout=subprocess.PIPE, check=False)
+    return p.returncode == 0
+
+
+@cache
+def get_version(detailed_version=False):
+    # В Docker и generic Linux използваме "test" като image версия
+    if IS_WINDOWS:
+        # updated manually when big changes are made to the windows virtual IoT
+        image_version = '23.11'
     else:
-        cert_path = Path('/etc/ssl/certs/nginx-cert.crt')
+        image_version = 'test'
 
-    if not cert_path.exists():
-        return None
+    version = IOT_CHAR + image_version
+    if detailed_version:
+        version += f"-{odoo_release.version}"
+    return version
 
+
+def get_img_name():
+    major, minor = get_version()[1:].split('.')
+    return f'iotboxv{major}_{minor}.zip'
+
+
+def check_image():
+    """Check if the current IoT Box image is up to date (за стария barebone image).
+
+    В Docker сценарий това не се използва; функцията остава за съвместимост.
+    """
     try:
-        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
-    except ValueError:
-        _logger.exception("Unable to read certificate file.")
-        return None
+        response = requests.get('https://nightly.odoo.com/master/iotbox/SHA1SUMS.txt', timeout=5)
+        response.raise_for_status()
+        data = response.text
+    except requests.exceptions.HTTPError:
+        _logger.exception('Could not reach the server to get the latest image version')
+        return False
 
-    common_name = next(
-        (name_attribute.value for name_attribute in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)), ''
+    current, latest = '', ''
+    hashes = {}
+    for line in data.splitlines():
+        if not line.strip():
+            continue
+        value, name = line.split('  ')
+        hashes[value] = name
+        if name == 'iotbox-latest.zip':
+            latest = value
+        elif name == get_img_name():
+            current = value
+    if current == latest:
+        return False
+
+    version = (
+        hashes.get(latest, 'Error')
+        .removeprefix('iotboxv')
+        .removesuffix('.zip')
+        .split('_')
     )
-
-    cert_end_date = cert.not_valid_after_utc
-    if (
-            common_name == 'OdooTempIoTBoxCertificate'
-            or datetime.datetime.now(datetime.timezone.utc) > cert_end_date - datetime.timedelta(days=10)
-    ):
-        _logger.debug("SSL certificate '%s' must be updated.", common_name)
-        return None
-
-    _logger.debug("SSL certificate '%s' is valid until %s", common_name, cert_end_date)
-    return str(cert_end_date)
+    return {'major': version[0], 'minor': version[1]}
 
 
-def download_odoo_certificate(retry=0):
-    """Download certificate from Odoo
+def update_conf(values, section='iot.box'):
+    """Update odoo.conf with the given key and value.
 
-    In Docker, certificates are managed by Traefik.
+    :param dict values: key-value pairs to update the config with.
+    :param str section: The section to update the key-value pairs in (Default: iot.box).
     """
-    if system.IS_DOCKER:
-        _logger.info("Certificate download disabled - using Traefik-managed certificates")
-        return None
+    _logger.debug("Updating odoo.conf with values: %s", values)
+    conf = get_conf()
 
-    # Original logic for non-Docker
+    if not conf.has_section(section):
+        _logger.debug("Creating new section '%s' in odoo.conf", section)
+        conf.add_section(section)
+
+    for key, value in values.items():
+        conf.set(section, key, value) if value else conf.remove_option(section, key)
+
+    with open(path_file("odoo.conf"), "w", encoding='utf-8') as f:
+        conf.write(f)
+
+
+def get_conf(key=None, section='iot.box'):
+    """Get the value of the given key from odoo.conf, or the full config if no key is provided.
+
+    :param key: The key to get the value of.
+    :param section: The section to get the key from (Default: iot.box).
+    :return: The value of the key provided or None if it doesn't exist, or full conf object if no key is provided.
+    """
+    conf = configparser.RawConfigParser()
+    conf.read(path_file("odoo.conf"))
+
+    return conf.get(section, key, fallback=None) if key else conf  # Return the key's value or the configparser object
+
+
+def _get_identifier():
     if IS_TEST:
-        _logger.info("Skipping certificate download in test mode.")
-        return None
-    db_uuid = system.get_conf('db_uuid')
-    enterprise_code = system.get_conf('enterprise_code')
-    if not db_uuid:
-        return None
+        return 'test_identifier'
+
+    # On windows, get motherboard's uuid (serial number isn't always present)
+    command = ['powershell', '-Command', "(Get-CimInstance Win32_ComputerSystemProduct).UUID"]
+    p = subprocess.run(command, stdout=subprocess.PIPE, check=False)
+    identifier = get_conf('generated_identifier')  # Fallback identifier if windows does not return mb UUID
+    if p.returncode == 0 and p.stdout.decode().strip():
+        return p.stdout.decode().strip()
+
+    _logger.error("Failed to get Windows IoT serial number, defaulting to a random identifier")
+    if not identifier:
+        identifier = secrets.token_hex()
+        update_conf({'generated_identifier': identifier})
+
+    return identifier
+
+
+def _get_system_uptime():
+    # Без RPi специфики – не четем /proc/uptime тук. Просто 0.
+    return 0.0
+
+
+def is_ngrok_enabled():
+    """Check if a ngrok tunnel is active on the IoT Box"""
     try:
-        response = requests.post(
-            'https://www.odoo.com/odoo-enterprise/iot/x509',
-            json={'params': {'db_uuid': db_uuid, 'enterprise_code': enterprise_code}},
-            timeout=95,  # let's encrypt library timeout
-        )
+        response = requests.get("http://localhost:4040/api/tunnels", timeout=5)
         response.raise_for_status()
-        response_body = response.json()
-    except (requests.exceptions.RequestException, ValueError) as e:
-        _logger.warning("An error occurred while trying to reach odoo.com to get a new certificate: %s", e)
-        if retry < 5:
-            return download_odoo_certificate(retry=retry + 1)
-        return _logger.exception("Maximum attempt to download the odoo.com certificate reached")
-
-    server_error = response_body.get('error')
-    if server_error:
-        _logger.error("Server error received from odoo.com while trying to get the certificate: %s", server_error)
-        return None
-
-    result = response_body.get('result', {})
-    certificate_error = result.get('error')
-    if certificate_error:
-        _logger.warning("Error received from odoo.com while trying to get the certificate: %s", certificate_error)
-        return None
-
-    system.update_conf({'subject': result['subject_cn']})
-
-    certificate = result['x509_pem']
-    private_key = result['private_key_pem']
-    if not certificate or not private_key:  # ensure not empty strings
-        _logger.error("The certificate received from odoo.com is not valid.")
-        return None
-
-    if IS_RPI:
-        Path('/etc/ssl/certs/nginx-cert.crt').write_text(certificate, encoding='utf-8')
-        Path('/root_bypass_ramdisks/etc/ssl/certs/nginx-cert.crt').write_text(certificate, encoding='utf-8')
-        Path('/etc/ssl/private/nginx-cert.key').write_text(private_key, encoding='utf-8')
-        Path('/root_bypass_ramdisks/etc/ssl/private/nginx-cert.key').write_text(private_key, encoding='utf-8')
-        system.start_nginx_server()
-        return str(x509.load_pem_x509_certificate(certificate.encode()).not_valid_after_utc)
-    else:
-        # Windows path
-        nginx_path = system.path_file('nginx')
-        Path(nginx_path, 'conf', 'nginx-cert.crt').write_text(certificate, encoding='utf-8')
-        Path(nginx_path, 'conf', 'nginx-cert.key').write_text(private_key, encoding='utf-8')
-        odoo_restart(3)
-        return None
+        response.json()
+        return True
+    except (requests.exceptions.RequestException, ValueError):
+        _logger.debug("Ngrok isn't running.", exc_info=True)
+        return False
 
 
-@require_db
-def inform_database(ssl_certificate_end_date, server_url=None):
-    """Inform the database about the certificate end date.
+def toggle_remote_connection(token=""):
+    """Enable/disable remote connection to the IoT Box using ngrok.
 
-    If end date is ``None``, we avoid sending a useless request.
-
-    :param str ssl_certificate_end_date: End date of the SSL certificate
-    :param str server_url: URL of the Odoo server (provided by decorator).
+    В Docker това ще работи само ако в контейнера има ngrok и systemd
+    съответно конфигурирани.
     """
-    if not ssl_certificate_end_date:
-        return
+    _logger.info("Toggling remote connection with token: %s...", token[:5] if token else "<No Token>")
+    p = subprocess.run(
+        ['ngrok', 'config', 'add-authtoken', token],
+        check=False,
+    )
+    if p.returncode == 0:
+        # Няма да разчитаме на /home/pi/ngrok.yml и systemd; оставяме само конфигуриране.
+        return True
+    return False
 
+
+def generate_password():
+    """Генерира произволна парола (без да променя системен потребител)."""
+    return secrets.token_urlsafe(16)
+
+
+def get_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        response = requests.post(
-            server_url + "/iot/box/update_certificate_status",
-            json={'params': {'identifier': IOT_IDENTIFIER, 'ssl_certificate_end_date': ssl_certificate_end_date}},
-            timeout=5,
-        )
-        response.raise_for_status()
-    except requests.exceptions.RequestException:
-        _logger.exception("Could not reach configured server to inform about the certificate status")
+        s.connect(('8.8.8.8', 1))  # Google DNS
+        return s.getsockname()[0]
+    except OSError as e:
+        _logger.warning("Could not get local IP address: %s", e)
+        return None
+    finally:
+        s.close()
+
+
+def get_mac_address():
+    interfaces = netifaces.interfaces()
+    for interface in map(netifaces.ifaddresses, interfaces):
+        if interface.get(netifaces.AF_INET):
+            addr = interface.get(netifaces.AF_LINK)[0]['addr']
+            if addr != '00:00:00:00:00:00':
+                return addr
+    return None
+
+
+NGINX_PATH = path_file('nginx')
+
+
+def start_nginx_server():
+    """No-op в Docker/generic Linux.
+
+    Оставена за съвместимост с места, които я извикват.
+    """
+    if IS_WINDOWS and NGINX_PATH:
+        _logger.info('Start Nginx server: %s\\nginx.exe', NGINX_PATH)
+        subprocess.Popen([str(NGINX_PATH / 'nginx.exe')], cwd=str(NGINX_PATH))
+    # В Linux/Docker не правим нищо специално.
+
+
+def mtr(host):
+    """Run mtr command to the given host to get both
+    packet loss (%) and average latency (ms).
+
+    Note: we use ``-4`` in order to force IPv4, to avoid
+    empty results on IPv6 networks.
+
+    :param host: The host to ping.
+    :return: A tuple of (packet_loss, avg_latency) or (None, None) if the command failed.
+    """
+    if IS_WINDOWS:
+        return None, None
+
+    command = ["mtr", "-r", "-C", "--no-dns", "-c", "3", "-i", "0.2", "-4", "-G", "1", host]
+    p = subprocess.run(command, stdout=subprocess.PIPE, text=True, check=False)
+    if p.returncode != 0:
+        return None, None
+
+    output = p.stdout.strip()
+    last_line = output.splitlines()[-1].split(",")
+    try:
+        return float(last_line[6]), float(last_line[10])
+    except (IndexError, ValueError):
+        return None, None
+
+
+def get_gateway():
+    """Get the router IP address (default gateway)
+
+    :return: The IP address of the default gateway or None if it can't be determined
+    """
+    gws = netifaces.gateways()
+    default = gws.get("default", {})
+    gw = default.get(netifaces.AF_INET)
+    if gw:
+        return gw[0]
+    return None
+
+
+IOT_IDENTIFIER = _get_identifier()
+ODOO_START_TIME = time.monotonic()
+SYSTEM_START_TIME = ODOO_START_TIME - _get_system_uptime()

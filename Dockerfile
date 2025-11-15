@@ -17,28 +17,23 @@ ENV IOT_IN_DOCKER=true \
 
 # === SYSTEM PACKAGES ===
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Core utilities
     ca-certificates \
     curl \
     wget \
     git \
     sudo \
     gnupg \
-    # Python
     python3 \
     python3-pip \
     python3-dev \
     python3-venv \
-    # Networking
     iputils-ping \
     net-tools \
     iproute2 \
     dbus \
     libdbus-1-dev \
-    # USB/Serial
     usbutils \
     pciutils \
-    # Build tools (for Python packages)
     gcc \
     g++ \
     make \
@@ -48,16 +43,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxslt1-dev \
     libjpeg-dev \
     zlib1g-dev \
-    # CUPS client libraries (не daemon!)
     libcups2-dev \
-    # Printer support
     python3-cups \
-    # Serial/USB Python deps
     libusb-1.0-0-dev \
     libudev-dev \
-    # WiFi management
     python3-dbus \
-    # Cleanup
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 

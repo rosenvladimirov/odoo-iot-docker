@@ -18,16 +18,22 @@ tls:
 
   # === Certificates ===
   certificates:
-    # Self-signed certificate (auto-loaded)
+    # Локален домейн – сертификат от Step-CA
     - certFile: /certs/cert.pem
       keyFile: /certs/key.pem
+      stores:
+        - default
+
+    # Публичен домейн – сертификат, изтеглен от Odoo
+    - certFile: /certs/odoo-public-cert.pem
+      keyFile: /certs/odoo-public-key.pem
       stores:
         - default
 
   # === Certificate Store ===
   stores:
     default:
+      # Default certificate (fallback), използва локалния Step-CA сертификат
       defaultCertificate:
         certFile: /certs/cert.pem
         keyFile: /certs/key.pem
-

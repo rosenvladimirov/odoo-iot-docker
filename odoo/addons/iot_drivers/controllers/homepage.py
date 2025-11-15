@@ -2,7 +2,6 @@
 
 import json
 import logging
-import netifaces
 import subprocess
 import threading
 import time
@@ -12,9 +11,11 @@ from pathlib import Path
 
 from odoo import http
 from odoo.addons.iot_drivers.tools import certificate, helpers, route, system, upgrade, wifi
-from odoo.addons.iot_drivers.tools.system import IS_RPI, IOT_IDENTIFIER, IOT_SYSTEM, ODOO_START_TIME, SYSTEM_START_TIME
+from odoo.addons.iot_drivers.tools.step_ca_client import get_step_ca_client
+from odoo.addons.iot_drivers.tools.system import IOT_IDENTIFIER, IOT_SYSTEM, ODOO_START_TIME, SYSTEM_START_TIME
 from odoo.addons.iot_drivers.main import iot_devices, unsupported_devices
 from odoo.addons.iot_drivers.connection_manager import connection_manager
+from odoo.tools import config as odoo_config
 from odoo.tools.misc import file_path
 from odoo.addons.iot_drivers.server_logger import (
     check_and_update_odoo_config_log_to_server_option,
@@ -47,61 +48,103 @@ class IotBoxOwlHomePage(http.Controller):
 
     @route.iot_route('/', type='http')
     def index(self):
-        return http.Stream.from_path("iot_drivers/views/index.html").get_response(content_security_policy=CONTENT_SECURITY_POLICY)
+        return http.Stream.from_path("iot_drivers/views/index.html").get_response(
+            content_security_policy=CONTENT_SECURITY_POLICY
+        )
 
     @route.iot_route('/logs', type='http')
     def logs_page(self):
-        return http.Stream.from_path("iot_drivers/views/logs.html").get_response(content_security_policy=CONTENT_SECURITY_POLICY)
+        return http.Stream.from_path("iot_drivers/views/logs.html").get_response(
+            content_security_policy=CONTENT_SECURITY_POLICY
+        )
 
     @route.iot_route('/status', type='http')
     def status_page(self):
-        return http.Stream.from_path("iot_drivers/views/status_display.html").get_response(content_security_policy=CONTENT_SECURITY_POLICY)
+        return http.Stream.from_path("iot_drivers/views/status_display.html").get_response(
+            content_security_policy=CONTENT_SECURITY_POLICY
+        )
+
+    # ---------------------------------------------------------- #
+    # CERTIFICATE (Step-CA / Docker)                             #
+    # Съвместими с CertificateDialog.js                          #
+    # ---------------------------------------------------------- #
 
     @route.iot_route('/iot_drivers/certificate/health', type='http', cors='*')
     def get_certificate_health(self):
-        """Check the health status of the Certificate Authority"""
-        try:
-            # Check if step-ca service is running
-            result = subprocess.run(
-                ['systemctl', 'is-active', 'step-ca'],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+        """Health статус на Step-CA.
 
-            is_running = result.stdout.strip() == 'active'
+        Очакван от CertificateDialog.loadCAHealth():
+        - връща dict с ключове: status, message.
+        """
+        if system.IS_DOCKER:
+            try:
+                client = get_step_ca_client()
+                data = client.health()
+                return json.dumps(data)
+            except Exception as e:
+                _logger.exception("Error checking Step-CA health")
+                return json.dumps({
+                    'status': 'error',
+                    'message': str(e),
+                })
 
-            return json.dumps({
-                'status': 'healthy' if is_running else 'unhealthy',
-                'message': 'Step-CA service is running' if is_running else 'Step-CA service is not running'
-            })
-        except Exception as e:
-            _logger.exception('Error checking CA health')
-            return json.dumps({
-                'status': 'error',
-                'message': str(e)
-            })
+        # Извън Docker – маркираме като невалиден (нямаме Step-CA)
+        return json.dumps({
+            'status': 'unhealthy',
+            'message': 'Step-CA is not configured in this environment',
+        })
 
     @route.iot_route('/iot_drivers/certificate/info', type='http', cors='*')
     def get_certificate_info(self):
-        """Get information about the current certificate"""
-        try:
-            cert_end_date = certificate.get_certificate_end_date()
+        """Информация за текущия локален TLS сертификат (Step-CA).
 
+        Очакван от CertificateDialog.loadCertificateInfo():
+        - status: 'active' | 'none' | 'error'
+        - common_name
+        - valid_from
+        - valid_until
+        - days_left
+        - sans: list
+        """
+        try:
+            if system.IS_DOCKER:
+                cert_path = Path('/app/certs/cert.pem')
+                if not cert_path.exists():
+                    return json.dumps({
+                        'status': 'none',
+                        'message': 'No certificate found',
+                    })
+
+                client = get_step_ca_client()
+                info = client.get_certificate_info(str(cert_path))
+                if info.get('status') != 'success':
+                    return json.dumps({
+                        'status': 'error',
+                        'message': info.get('message', 'Failed to read certificate'),
+                    })
+
+                return json.dumps({
+                    'status': 'active',
+                    'common_name': info['common_name'],
+                    'valid_from': info['not_before'],
+                    'valid_until': info['not_after'],
+                    'days_left': info['days_left'],
+                    'sans': info.get('sans', []),
+                })
+
+            # Извън Docker – fallback към оригиналния nginx сертификат (ако има)
+            cert_end_date = certificate.get_certificate_end_date()
             if not cert_end_date:
                 return json.dumps({
                     'status': 'none',
-                    'message': 'No certificate found'
+                    'message': 'No certificate found',
                 })
 
-            # Parse certificate details
-            base_path = [system.NGINX_PATH, 'conf'] if system.IS_WINDOWS else ['/etc/ssl/certs']
-            path = Path(*base_path, 'nginx-cert.crt')
-
+            path = Path('/etc/ssl/certs/nginx-cert.crt')
             if not path.exists():
                 return json.dumps({
                     'status': 'none',
-                    'message': 'Certificate file not found'
+                    'message': 'Certificate file not found',
                 })
 
             from cryptography import x509
@@ -109,14 +152,11 @@ class IotBoxOwlHomePage(http.Controller):
             from datetime import datetime, timezone
 
             cert = x509.load_pem_x509_certificate(path.read_bytes())
-
-            # Get common name
             common_name = next(
                 (attr.value for attr in cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)),
                 'Unknown'
             )
 
-            # Get SANs
             sans = []
             try:
                 san_ext = cert.extensions.get_extension_for_oid(ExtensionOID.SUBJECT_ALTERNATIVE_NAME)
@@ -124,7 +164,6 @@ class IotBoxOwlHomePage(http.Controller):
             except Exception:
                 pass
 
-            # Calculate days left
             valid_until = cert.not_valid_after_utc
             days_left = (valid_until - datetime.now(timezone.utc)).days
 
@@ -134,165 +173,139 @@ class IotBoxOwlHomePage(http.Controller):
                 'valid_from': str(cert.not_valid_before_utc),
                 'valid_until': str(valid_until),
                 'days_left': days_left,
-                'sans': sans
+                'sans': sans,
             })
 
         except Exception as e:
-            _logger.exception('Error getting certificate info')
+            _logger.exception("Error getting certificate info")
             return json.dumps({
                 'status': 'error',
-                'message': str(e)
+                'message': str(e),
             })
 
     @route.iot_route('/iot_drivers/certificate/provisioners', type='http', cors='*')
     def get_provisioners(self):
-        """Get list of available Step-CA provisioners"""
-        try:
-            result = subprocess.run(
-                ['step', 'ca', 'provisioner', 'list', '--ca-url', 'https://localhost:9000'],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+        """Списък с Step-CA provisioners.
 
-            if result.returncode == 0:
-                import json as json_lib
-                provisioners = json_lib.loads(result.stdout)
+        Очакван от CertificateDialog.loadProvisioners():
+        - връща { provisioners: [...] }
+        """
+        if system.IS_DOCKER:
+            try:
+                client = get_step_ca_client()
+                provisioners = client.get_provisioners()
                 return json.dumps({'provisioners': provisioners})
-            else:
+            except Exception as e:
+                _logger.exception("Error getting provisioners")
                 return json.dumps({'provisioners': []})
 
-        except Exception as e:
-            _logger.exception('Error getting provisioners')
-            return json.dumps({'provisioners': []})
+        # Извън Docker – връщаме празно
+        return json.dumps({'provisioners': []})
 
     @route.iot_route('/iot_drivers/certificate/generate', type='jsonrpc', methods=['POST'], cors='*')
     def generate_certificate(self, common_name, sans=None):
-        """Generate a new certificate using Step-CA"""
+        """Генерира нов локален TLS сертификат чрез Step-CA.
+
+        UI (CertificateDialog.generateCertificate) очаква:
+        - { status: 'success'|'error', message?: str }
+        """
+        if not system.IS_DOCKER:
+            return {
+                'status': 'error',
+                'message': 'Certificate generation via Step-CA is only supported in Docker mode.',
+            }
+
+        if not common_name:
+            return {'status': 'error', 'message': 'Common name is required'}
+
         try:
-            if not common_name:
-                return {'status': 'error', 'message': 'Common name is required'}
+            client = get_step_ca_client()
+            result = client.generate_certificate(common_name, sans=sans or None)
+            if result.get('status') != 'success':
+                return result
 
-            # Build step-cli command
-            cmd = [
-                'step', 'ca', 'certificate',
-                common_name,
-                '/etc/ssl/certs/nginx-cert.crt',
-                '/etc/ssl/private/nginx-cert.key',
-                '--ca-url', 'https://localhost:9000',
-                '--force',  # Overwrite existing files
-            ]
+            cert_dir = Path('/app/certs')
+            cert_dir.mkdir(parents=True, exist_ok=True)
 
-            # Add SANs if provided
-            if sans:
-                for san in sans:
-                    cmd.extend(['--san', san])
+            (cert_dir / 'cert.pem').write_text(result['certificate'], encoding='utf-8')
+            (cert_dir / 'key.pem').write_text(result['private_key'], encoding='utf-8')
+            if result.get('ca_chain'):
+                (cert_dir / 'ca.crt').write_text(result['ca_chain'], encoding='utf-8')
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False
-            )
-
-            if result.returncode == 0:
-                # Also copy to persistent storage for Raspberry Pi
-                if system.IS_RPI:
-                    subprocess.run([
-                        'sudo', 'cp',
-                        '/etc/ssl/certs/nginx-cert.crt',
-                        '/root_bypass_ramdisks/etc/ssl/certs/nginx-cert.crt'
-                    ], check=False)
-                    subprocess.run([
-                        'sudo', 'cp',
-                        '/etc/ssl/private/nginx-cert.key',
-                        '/root_bypass_ramdisks/etc/ssl/private/nginx-cert.key'
-                    ], check=False)
-                    system.start_nginx_server()
-
-                return {'status': 'success', 'message': 'Certificate generated successfully'}
-            else:
-                return {'status': 'error', 'message': result.stderr or 'Failed to generate certificate'}
-
+            return {'status': 'success', 'message': 'Certificate generated successfully'}
         except Exception as e:
-            _logger.exception('Error generating certificate')
+            _logger.exception("Error generating certificate")
             return {'status': 'error', 'message': str(e)}
 
     @route.iot_route('/iot_drivers/certificate/renew', type='jsonrpc', methods=['POST'], cors='*')
     def renew_certificate(self):
-        """Renew the current certificate"""
+        """Подновяване на локалния Step-CA сертификат."""
+        if not system.IS_DOCKER:
+            return {
+                'status': 'error',
+                'message': 'Certificate renewal via Step-CA is only supported in Docker mode.',
+            }
+
+        cert_path = Path('/app/certs/cert.pem')
+        key_path = Path('/app/certs/key.pem')
+        if not cert_path.exists() or not key_path.exists():
+            return {'status': 'error', 'message': 'No certificate to renew'}
+
         try:
-            result = subprocess.run(
-                [
-                    'step', 'ca', 'renew',
-                    '/etc/ssl/certs/nginx-cert.crt',
-                    '/etc/ssl/private/nginx-cert.key',
-                    '--ca-url', 'https://localhost:9000',
-                    '--force'
-                ],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            client = get_step_ca_client()
+            result = client.renew_certificate(str(cert_path), str(key_path))
+            if result.get('status') != 'success':
+                return result
 
-            if result.returncode == 0:
-                # Copy to persistent storage for Raspberry Pi
-                if system.IS_RPI:
-                    subprocess.run([
-                        'sudo', 'cp',
-                        '/etc/ssl/certs/nginx-cert.crt',
-                        '/root_bypass_ramdisks/etc/ssl/certs/nginx-cert.crt'
-                    ], check=False)
-                    subprocess.run([
-                        'sudo', 'cp',
-                        '/etc/ssl/private/nginx-cert.key',
-                        '/root_bypass_ramdisks/etc/ssl/private/nginx-cert.key'
-                    ], check=False)
-                    system.start_nginx_server()
+            cert_path.write_text(result['certificate'], encoding='utf-8')
+            if result.get('ca_chain'):
+                (cert_path.parent / 'ca.crt').write_text(result['ca_chain'], encoding='utf-8')
 
-                return {'status': 'success', 'message': 'Certificate renewed successfully'}
-            else:
-                return {'status': 'error', 'message': result.stderr or 'Failed to renew certificate'}
-
+            return {'status': 'success', 'message': 'Certificate renewed successfully'}
         except Exception as e:
-            _logger.exception('Error renewing certificate')
+            _logger.exception("Error renewing certificate")
             return {'status': 'error', 'message': str(e)}
 
     @route.iot_route('/iot_drivers/certificate/revoke', type='jsonrpc', methods=['POST'], cors='*')
     def revoke_certificate(self):
-        """Revoke the current certificate"""
+        """Отмяна (revoke) на текущия Step-CA сертификат.
+
+        UI (CertificateDialog.revokeCertificate) очаква:
+        - { status: 'success'|'error', message?: str }
+        и при success показва FullScreen loader.
+        """
+        if not system.IS_DOCKER:
+            return {
+                'status': 'error',
+                'message': 'Certificate revocation via Step-CA is only supported in Docker mode.',
+            }
+
+        cert_path = Path('/app/certs/cert.pem')
+        if not cert_path.exists():
+            return {'status': 'error', 'message': 'No certificate found to revoke'}
+
         try:
-            cert_path = Path('/etc/ssl/certs/nginx-cert.crt')
+            client = get_step_ca_client()
+            info = client.get_certificate_info(str(cert_path))
+            if info.get('status') != 'success':
+                return {
+                    'status': 'error',
+                    'message': info.get('message', 'Failed to read certificate'),
+                }
 
-            if not cert_path.exists():
-                return {'status': 'error', 'message': 'No certificate found to revoke'}
+            serial = info.get('serial_number')
+            result = client.revoke_certificate(serial)
+            if result.get('status') != 'success':
+                return result
 
-            result = subprocess.run(
-                [
-                    'step', 'ca', 'revoke',
-                    '--cert', str(cert_path),
-                    '--ca-url', 'https://localhost:9000'
-                ],
-                capture_output=True,
-                text=True,
-                check=False
-            )
+            # Изтриваме локалните файлове; Traefik ще fallback-не на default cert
+            cert_path.unlink(missing_ok=True)
+            (cert_path.parent / 'key.pem').unlink(missing_ok=True)
+            (cert_path.parent / 'ca.crt').unlink(missing_ok=True)
 
-            if result.returncode == 0:
-                # Delete certificate files
-                cert_path.unlink(missing_ok=True)
-                Path('/etc/ssl/private/nginx-cert.key').unlink(missing_ok=True)
-
-                if system.IS_RPI:
-                    Path('/root_bypass_ramdisks/etc/ssl/certs/nginx-cert.crt').unlink(missing_ok=True)
-                    Path('/root_bypass_ramdisks/etc/ssl/private/nginx-cert.key').unlink(missing_ok=True)
-
-                return {'status': 'success', 'message': 'Certificate revoked successfully'}
-            else:
-                return {'status': 'error', 'message': result.stderr or 'Failed to revoke certificate'}
-
+            return {'status': 'success', 'message': 'Certificate revoked successfully'}
         except Exception as e:
-            _logger.exception('Error revoking certificate')
+            _logger.exception("Error revoking certificate")
             return {'status': 'error', 'message': str(e)}
 
     # ---------------------------------------------------------- #
@@ -309,11 +322,27 @@ class IotBoxOwlHomePage(http.Controller):
 
     @route.iot_route('/iot_drivers/iot_logs', type='http', cors='*')
     def get_iot_logs(self):
-        logs_path = "/var/log/odoo/odoo-server.log" if IS_RPI else Path().absolute().parent.joinpath('odoo.log')
-        with open(logs_path, encoding="utf-8") as file:
+        # В Docker и generic Linux използваме logfile от odoo.conf, ако е зададен;
+        # иначе – стандартен път във volume /app/logs/odoo.log
+        log_path = odoo_config['logfile']
+        if not log_path:
+            if system.IS_DOCKER:
+                log_path = "/app/logs/odoo.log"
+            else:
+                log_path = "/var/log/odoo/odoo-server.log"
+
+        try:
+            with open(log_path, encoding="utf-8") as file:
+                return json.dumps({
+                    'status': 'success',
+                    'logs': file.read(),
+                })
+        except FileNotFoundError:
+            _logger.warning("Log file not found at %s", log_path)
             return json.dumps({
-                'status': 'success',
-                'logs': file.read(),
+                'status': 'error',
+                'logs': '',
+                'message': f'Log file not found: {log_path}',
             })
 
     @route.iot_route('/iot_drivers/six_payment_terminal_clear', type='http', cors='*')
@@ -363,20 +392,8 @@ class IotBoxOwlHomePage(http.Controller):
 
     @route.iot_route('/iot_drivers/data', type="http", cors='*')
     def get_homepage_data(self):
+        # В Docker / generic Linux – без RPi access point логика
         network_interfaces = []
-        if IS_RPI:
-            ssid = wifi.get_current() or wifi.get_access_point_ssid()
-            for iface_id in netifaces.interfaces():
-                if iface_id == 'lo':
-                    continue  # Skip loopback interface (127.0.0.1)
-
-                is_wifi = 'wlan' in iface_id
-                network_interfaces.extend([{
-                    'id': iface_id,
-                    'is_wifi': is_wifi,
-                    'ssid': ssid if is_wifi else None,
-                    'ip': conf.get('addr', 'No Internet'),
-                } for conf in netifaces.ifaddresses(iface_id).get(netifaces.AF_INET, [])])
 
         devices = [{
             'name': device.device_name,
@@ -395,7 +412,7 @@ class IotBoxOwlHomePage(http.Controller):
         }
 
         six_terminal = system.get_conf('six_payment_terminal') or 'Not Configured'
-        network_qr_codes = wifi.generate_network_qr_codes() if IS_RPI else {}
+        network_qr_codes = wifi.generate_network_qr_codes()
         odoo_server_url = helpers.get_odoo_server_url() or ''
         odoo_uptime_seconds = time.monotonic() - ODOO_START_TIME
         system_uptime_seconds = time.monotonic() - SYSTEM_START_TIME
@@ -412,7 +429,7 @@ class IotBoxOwlHomePage(http.Controller):
             'new_database_url': connection_manager.new_database_url,
             'pairing_code_expired': connection_manager.pairing_code_expired and not odoo_server_url,
             'six_terminal': six_terminal,
-            'is_access_point_up': IS_RPI and wifi.is_access_point(),
+            'is_access_point_up': False,
             'network_interfaces': network_interfaces,
             'version': system.get_version(),
             'system': IOT_SYSTEM,
@@ -433,7 +450,17 @@ class IotBoxOwlHomePage(http.Controller):
 
     @route.iot_route('/iot_drivers/version_info', type="http", cors='*', linux_only=True)
     def get_version_info(self):
-        # Check branch name and last commit hash on IoT Box
+        # Docker: обновяването се прави чрез нови images – не ползваме git update на устройството.
+        if system.IS_DOCKER:
+            return json.dumps({
+                'status': 'success',
+                'odooIsUpToDate': True,
+                'imageIsUpToDate': True,
+                'currentCommitHash': '',
+                'message': 'Updates are managed via Docker images.',
+            })
+
+        # Non-Docker dev среда – запазваме оригиналното поведение
         current_commit = system.git("rev-parse", "HEAD")
         current_branch = system.git("rev-parse", "--abbrev-ref", "HEAD")
         if not current_commit or not current_branch:
@@ -455,7 +482,8 @@ class IotBoxOwlHomePage(http.Controller):
             'status': 'success',
             # Checkout requires db to align with its version (=branch)
             'odooIsUpToDate': current_commit == last_available_commit or not bool(helpers.get_odoo_server_url()),
-            'imageIsUpToDate': IS_RPI and not bool(system.check_image()),
+            # RPi image update логиката е премахната – не следим imageIsUpToDate
+            'imageIsUpToDate': False,
             'currentCommitHash': current_commit,
         })
 
@@ -619,6 +647,12 @@ class IotBoxOwlHomePage(http.Controller):
 
     @route.iot_route('/iot_drivers/update_git_tree', type="jsonrpc", methods=['POST'], cors='*', linux_only=True)
     def update_git_tree(self):
+        if system.IS_DOCKER:
+            return {
+                'status': 'error',
+                'message': 'Code updates are managed via Docker images, not via git on the device.',
+            }
+
         upgrade.check_git_branch()
         return {
             'status': 'success',

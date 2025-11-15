@@ -1,6 +1,6 @@
 import logging
 
-from odoo.addons.iot_drivers.tools.system import IS_RPI
+from odoo.addons.iot_drivers.tools.system import IS_WINDOWS
 from odoo import http
 
 _logger = logging.getLogger(__name__)
@@ -14,7 +14,8 @@ def iot_route(route=None, linux_only=False, **kwargs):
     Both auth and sessions are useless on IoT since we have no DB and no users.
 
     :param route: The route to be decorated.
-    :param linux_only: If ``True``, the route will be forbidden for virtual IoT Boxes.
+    :param linux_only: If ``True``, the route will be forbidden on Windows
+                       (но ще работи в Linux / Docker).
     """
     if 'auth' not in kwargs:
         kwargs['auth'] = 'none'
@@ -24,8 +25,8 @@ def iot_route(route=None, linux_only=False, **kwargs):
     http_decorator = http.route(route, **kwargs)
 
     def decorator(endpoint):
-        if linux_only and not IS_RPI:
-            return None  # Remove the route if not Linux (will return 404)
+        if linux_only and IS_WINDOWS:
+            return None  # Remove the route on Windows (will return 404)
         return http_decorator(endpoint)
 
     return decorator

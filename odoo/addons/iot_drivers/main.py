@@ -9,10 +9,6 @@ import time
 from odoo.addons.iot_drivers.tools import certificate, helpers, system, upgrade, wifi
 from odoo.addons.iot_drivers.websocket_client import WebsocketClient
 
-if system.IS_RPI:
-    from dbus.mainloop.glib import DBusGMainLoop
-    DBusGMainLoop(set_as_default=True)  # Must be started from main thread
-
 _logger = logging.getLogger(__name__)
 
 drivers = []
@@ -34,7 +30,7 @@ class Manager(Thread):
 
     def _get_domain(self):
         """
-        Get the iot box domain based on the IP address and subject.
+        Get the IoT Box domain based on the IP address and subject.
         """
         subject = system.get_conf('subject')
         ip_addr = system.get_ip()
@@ -56,11 +52,12 @@ class Manager(Thread):
             self.previous_unsupported_devices = unsupported_devices.copy()
             changed = True
 
-        # IP address change
+        # IP/domain change
         new_domain = self._get_domain()
         if self.domain != new_domain:
             self.domain = new_domain
             changed = True
+
         # Version change
         new_version = system.get_version(detailed_version=True)
         if self.version != new_version:
@@ -71,10 +68,7 @@ class Manager(Thread):
 
     @helpers.require_db
     def _send_all_devices(self, server_url=None):
-        """This method send IoT Box and devices information to Odoo database
-
-        As the server can be down or not started yet (in case of local testing),
-        we retry to send the data several times with a delay between each attempt.
+        """Send IoT Box and devices information to Odoo database.
 
         :param server_url: URL of the Odoo server (provided by decorator).
         """
@@ -96,7 +90,7 @@ class Manager(Thread):
             }
         devices_list.update(self.previous_unsupported_devices)
 
-        delay = .5
+        delay = 0.5
         max_retries = 5
         for attempt in range(1, max_retries + 1):
             try:
@@ -110,35 +104,36 @@ class Manager(Thread):
             except requests.exceptions.RequestException:
                 if attempt < max_retries:
                     _logger.warning(
-                        'Could not reach configured server to send all IoT devices, retrying in %s seconds (%d/%d attempts)',
+                        'Could not reach configured server to send all IoT devices, '
+                        'retrying in %s seconds (%d/%d attempts)',
                         delay, attempt, max_retries, exc_info=True
                     )
                     time.sleep(delay)
                 else:
-                    _logger.exception('Could not reach configured server to send all IoT devices after %d attempts.', max_retries)
+                    _logger.exception(
+                        'Could not reach configured server to send all IoT devices after %d attempts.',
+                        max_retries
+                    )
 
     def run(self):
-        """Thread that will load interfaces and drivers and contact the odoo server
-        with the updates. It will also reconnect to the Wi-Fi if the connection is lost.
+        """Main manager thread.
+
+        - стартира nginx (ако има такъв);
+        - проверява/синхронизира git branch (извън Docker);
+        - валидира сертификатите;
+        - изпраща информация за IoT Box и устройствата;
+        - зарежда IoT handlers;
+        - стартира интерфейсите;
+        - стартира WebSocket клиента;
+        - периодично изпраща обновена информация и изпълнява планирани задачи.
         """
-        if system.IS_RPI:
-            # ensure that the root filesystem is writable retro compatibility (TODO: remove this in 19.0)
-            subprocess.run(["sudo", "mount", "-o", "remount,rw", "/"], check=False)
-            subprocess.run(["sudo", "mount", "-o", "remount,rw", "/root_bypass_ramdisks/"], check=False)
-
-            wifi.reconnect(system.get_conf('wifi_ssid'), system.get_conf('wifi_password'))
-
         system.start_nginx_server()
         _logger.info("IoT Box Image version: %s", system.get_version(detailed_version=True))
         upgrade.check_git_branch()
 
-        if system.IS_RPI and helpers.get_odoo_server_url():
-            system.generate_password()
-
         certificate.ensure_validity()
 
-        # We first add the IoT Box to the connected DB because IoT handlers cannot be downloaded if
-        # the identifier of the Box is not found in the DB. So add the Box to the DB.
+        # Първо добавяме IoT Box към свързаната DB, за да могат да се свалят handlers
         self._send_all_devices()
         helpers.download_iot_handlers()
         helpers.load_iot_handlers()
@@ -146,24 +141,22 @@ class Manager(Thread):
         for interface in interfaces.values():
             interface().start()
 
-        # Set scheduled actions
+        # Scheduled actions
         schedule.every().day.at("00:00").do(certificate.ensure_validity)
         schedule.every().day.at("00:00").do(helpers.reset_log_level)
         schedule.every().monday.at("00:00").do(upgrade.check_git_branch, force=True)
 
-        # Set up the websocket connection
+        # WebSocket connection към Odoo server
         ws_client = WebsocketClient()
         if ws_client:
             ws_client.start()
 
-        # Check every 3 seconds if the list of connected devices has changed and send the updated
-        # list to the connected DB.
-        while 1:
+        # Check every 3 seconds if the list of connected devices has changed
+        # and send the updated list to the connected DB.
+        while True:
             try:
                 if self._get_changes_to_send():
                     self._send_all_devices()
-                if system.IS_RPI and system.get_ip() != '10.11.12.1':
-                    wifi.reconnect(system.get_conf('wifi_ssid'), system.get_conf('wifi_password'))
                 time.sleep(3)
                 schedule.run_pending()
             except Exception:

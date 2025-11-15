@@ -21,10 +21,6 @@ from odoo import http, service
 from odoo.addons.iot_drivers.tools import system
 from odoo.addons.iot_drivers.tools.system import (
     IOT_IDENTIFIER,
-    IS_RPI,
-    IS_WINDOWS,
-    IOT_RPI_CHAR,
-    IOT_WINDOWS_CHAR,
 )
 from odoo.tools.func import reset_cached_properties
 from odoo.tools.misc import file_path
@@ -228,17 +224,19 @@ def load_iot_handlers():
 def get_handlers_files_to_load(handler_path):
     """
     Get all handler files that an IoT system should load in a list.
-    - Rpi IoT boxes load file without suffixe and _L
-    - Windows IoT load file without suffixes and _W
+
+    В Docker/generic Linux зареждаме всички .py файлове (без __init__.py),
+    без да разграничаваме RPi/Windows суфикси.
+
     :param handler_path: The path to the directory containing the files (either drivers or interfaces)
     :return: files corresponding to the current IoT system
-    :rtype list:
+    :rtype: list[str]
     """
-    if IS_RPI:
-        return [x.name for x in Path(handler_path).glob(f'*[!{IOT_WINDOWS_CHAR}].*')]
-    elif IS_WINDOWS:
-        return [x.name for x in Path(handler_path).glob(f'*[!{IOT_RPI_CHAR}].*')]
-    return []
+    return [
+        x.name
+        for x in Path(handler_path).glob('*.py')
+        if x.name != '__init__.py'
+    ]
 
 
 def odoo_restart(delay=0):

@@ -171,6 +171,7 @@ services:
       - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
       - DEV_MODE=${DEV_MODE:-false}
       - STEP_CA_URL=https://step-ca:9000
+      - PKCS11_LIB_PATH=/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so
 
     labels:
       - "traefik.enable=true"
