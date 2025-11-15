@@ -1,5 +1,8 @@
 FROM smallstep/step-ca:latest
 
+# Използваме root за да можем да инсталираме пакети
+USER root
+
 # Install additional tools
 RUN apk add --no-cache \
     bash \
@@ -15,6 +18,9 @@ RUN mkdir -p /home/step/certs \
 # Copy scripts
 COPY scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh
+
+# Връщаме се към потребителя step (както е в оригиналния образ)
+USER step
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
