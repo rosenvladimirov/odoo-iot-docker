@@ -1,8 +1,8 @@
 # Core Odoo dependencies
 Babel==2.9.1
 chardet==4.0.0
-# За съвместимост с Python 3.12 използваме по-нова версия
-cryptography==41.0.7
+# За съвместимост с Python 3.12 и aiortc>=1.9.0
+cryptography==42.0.7
 decorator==4.4.2
 docutils==0.17
 ebaysdk==2.1.5
@@ -15,7 +15,7 @@ greenlet==3.0.3
 idna==2.10
 Jinja2==3.0.3
 libsass==0.20.1
-lxml==4.9.2
+#lxml==4.9.2
 MarkupSafe==2.0.1
 num2words==0.5.10
 ofxparse==0.21
@@ -25,7 +25,7 @@ polib==1.1.1
 psutil==5.8.0
 psycopg2-binary==2.9.9
 pydot==1.4.2
-pyopenssl==21.0.0
+pyopenssl==24.2.1
 PyPDF2==1.26.0
 pyserial==3.5
 python-dateutil==2.8.1
@@ -55,7 +55,8 @@ dbus-python==1.2.18
 pycups==2.0.1
 
 # Async/WebRTC
-aiortc==1.3.2
+av==12.0.0
+aiortc==1.9.0
 websocket-client==1.3.1
 
 # System monitoring
@@ -63,7 +64,7 @@ websocket-client==1.3.1
 # psutil==5.8.0
 
 # Crypto (for certificates)
-PyKCS11==1.5.11  # За Egyptian tax
+# PyKCS11==1.5.11  # За Egyptian tax
 
 # Scheduling
 schedule==1.1.0
@@ -73,7 +74,7 @@ schedule==1.1.0
 # Pillow==9.0.1
 
 # Certificate management
-# (cryptography вече е фиксиран по-горе на 41.0.7)
+# (cryptography вече е фиксиран по-горе на 42.0.7)
 # cryptography==41.0.7
 
 # ipython==8.10.0

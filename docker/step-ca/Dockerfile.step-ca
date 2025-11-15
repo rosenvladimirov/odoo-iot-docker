@@ -20,7 +20,7 @@ COPY scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh
 
 # Връщаме се към потребителя step (както е в оригиналния образ)
-USER step
+# USER step
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

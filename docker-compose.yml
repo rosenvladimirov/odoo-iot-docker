@@ -41,14 +41,16 @@ services:
     networks:
       - iot-network
 
-    # Custom command to run init + renewal daemon
-    command: >
-      sh -c "/home/step/init-ca.sh &
-             sleep 10 &&
-             /usr/local/bin/renewal-daemon.sh"
+    # Override на ENTRYPOINT – init, renewal daemon и step-ca
+    entrypoint: >
+      sh -c "
+        /usr/local/bin/init-ca.sh &&
+        /usr/local/bin/renewal-daemon.sh &
+        exec step-ca /home/step/config/ca.json --password-file /home/step/secrets/password.txt
+      "
 
     healthcheck:
-      test: ["CMD", "step", "ca", "health", "--ca-url=https://localhost:9000"]
+      test: ["CMD", "curl", "-k", "-f", "https://localhost:9000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -141,11 +143,11 @@ services:
       - NET_ADMIN
       - NET_RAW
 
+    privileged: true
+
     devices:
       - /dev/bus/usb:/dev/bus/usb
-      - /dev/ttyUSB0:/dev/ttyUSB0
-      - /dev/ttyUSB1:/dev/ttyUSB1
-      - /dev/ttyACM0:/dev/ttyACM0
+      - /dev:/dev
       - /dev/rfkill:/dev/rfkill
 
     volumes:

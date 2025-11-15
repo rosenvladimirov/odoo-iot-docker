@@ -44,6 +44,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxslt1-dev \
     libjpeg-dev \
     zlib1g-dev \
+    libldap2-dev \
+    libsasl2-dev \
     libcups2-dev \
     python3-cups \
     libusb-1.0-0-dev \
@@ -56,6 +58,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavfilter-dev \
     libswscale-dev \
     libswresample-dev \
+    libglib2.0-dev \
+    swig \
+    python3-lxml \
     python3-dbus \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
