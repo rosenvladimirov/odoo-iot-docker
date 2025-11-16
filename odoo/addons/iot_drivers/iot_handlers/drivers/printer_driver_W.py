@@ -7,16 +7,18 @@ from escpos import printer
 import escpos.exceptions
 import io
 
-if IS_WINDOWS:
-    import win32print
-    import pywintypes
-    import ghostscript
 
 from odoo.addons.iot_drivers.controllers.proxy import proxy_drivers
 from odoo.addons.iot_drivers.iot_handlers.drivers.printer_driver_base import PrinterDriverBase
 from odoo.addons.iot_drivers.tools import system
 from odoo.tools.mimetypes import guess_mimetype
 from odoo.addons.iot_drivers.iot_handlers.interfaces.printer_interface_W import win32print_lock
+from odoo.addons.iot_drivers.tools.system import IS_WINDOWS
+
+if IS_WINDOWS:
+    import win32print
+    import pywintypes
+    import ghostscript
 
 _logger = logging.getLogger(__name__)
 
