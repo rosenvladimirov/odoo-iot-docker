@@ -5,6 +5,42 @@
 
 services:
   # ===========================================
+  # STEP-CA INIT - еднократна инициализация на PKI
+  # ===========================================
+  step-ca-init:
+    image: smallstep/step-cli:latest
+    container_name: step-ca-init
+    user: "0:0"
+    restart: "no"
+    environment:
+      - STEP_CA_PASSWORD=${STEP_CA_PASSWORD:-changeme}
+      - STEP_CA_NAME=${STEP_CA_NAME:-IoT Box CA}
+      - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
+      - STEP_CA_PROVISIONER=${STEP_CA_PROVISIONER:-admin}
+    volumes:
+      - ./docker/step-ca/local-pki:/home/step
+    command: >
+      sh -c "
+        mkdir -p /home/step/secrets &&
+        if [ ! -f /home/step/secrets/password ]; then
+          echo \"$STEP_CA_PASSWORD\" > /home/step/secrets/password &&
+          chmod 600 /home/step/secrets/password;
+        fi &&
+        if [ -f /home/step/config/ca.json ]; then
+          echo 'CA already initialized, skipping step ca init';
+          exit 0;
+        fi &&
+        mkdir -p /home/step/config /home/step/certs /home/step/db &&
+        step ca init
+          --name \"$STEP_CA_NAME\"
+          --dns \"$IOT_DOMAIN\"
+          --address \":9000\"
+          --provisioner \"$STEP_CA_PROVISIONER\"
+          --password-file /home/step/secrets/password &&
+        chown -R 1000:1000 /home/step
+      "
+
+  # ===========================================
   # STEP-CA - Certificate Authority
   # ===========================================
   step-ca:
@@ -12,6 +48,10 @@ services:
     container_name: step-ca
     hostname: step-ca
     restart: unless-stopped
+
+    depends_on:
+      step-ca-init:
+        condition: service_completed_successfully
 
     ports:
       - "${STEP_CA_PORT:-9000}:9000"
@@ -21,14 +61,15 @@ services:
       - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
 
     volumes:
-      # Връзваме директно локалната PKI, генерирана с step-cli
-      - ./docker/step-ca/local-pki/config:/home/step/config
-      - ./docker/step-ca/local-pki/certs:/home/step/certs
-      - ./docker/step-ca/local-pki/secrets:/home/step/secrets
-      - ./docker/step-ca/local-pki/db:/home/step/db
+      # Монтираме цялата локална PKI, генерирана от step-ca-init
+      - ./docker/step-ca/local-pki:/home/step
 
     networks:
       - iot-network
+
+    # step-ca ще чете /home/step/config/ca.json и /home/step/secrets/password
+    entrypoint: >
+      sh -c "exec step-ca /home/step/config/ca.json"
 
     healthcheck:
       test: ["CMD", "curl", "-k", "-f", "https://localhost:9000/health"]
@@ -83,7 +124,7 @@ services:
       - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./docker/traefik/dynamic:/etc/traefik/dynamic:ro
 
-      # Step-CA certificates (ако искаш да ползваш root/intermediate от PKI)
+      # Step-CA certificates (root/intermediate от PKI)
       - ./docker/step-ca/local-pki/certs:/certs:ro
 
       - ./logs/traefik:/var/log/traefik
@@ -151,7 +192,7 @@ services:
       - ${CONFIG_PATH:-./config}:/app/config
       - ${LOGS_PATH:-./logs}/iot:/app/logs
 
-      # Step-CA certificates (read-only) – ако искаш достъп до root/intermediate
+      # Step-CA certificates (read-only)
       - ./docker/step-ca/local-pki/certs:/app/certs:ro
 
       - iot-data:/app/data
@@ -234,14 +275,4 @@ volumes:
     driver: local
 
   pgdata:
-    driver: local
-
-  # (Старите step-ca volumes вече не се ползват, но може да ги оставиш или да ги махнеш)
-  step-ca-config:
-    driver: local
-  step-ca-certs:
-    driver: local
-  step-ca-secrets:
-    driver: local
-  step-ca-db:
     driver: local

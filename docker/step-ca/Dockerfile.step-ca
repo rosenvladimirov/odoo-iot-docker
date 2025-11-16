@@ -24,7 +24,3 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD step ca health --ca-url=https://localhost:9000 || exit 1
 
 WORKDIR /home/step
-
-# ВАЖНО: НЕ override-ваме CMD тук!
-# Оставяме оригиналния CMD/ENTRYPOINT от smallstep/step-ca
-# CMD ["step-ca"]
