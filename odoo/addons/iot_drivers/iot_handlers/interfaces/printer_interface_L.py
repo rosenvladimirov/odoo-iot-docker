@@ -20,9 +20,27 @@ from odoo.addons.iot_drivers.main import iot_devices
 
 _logger = logging.getLogger(__name__)
 
-conn = CupsConnection()
-PPDs = conn.getPPDs()
+_cups_conn = None
+PPDs = {}
 cups_lock = Lock()  # We can only make one call to Cups at a time
+
+
+def get_cups_connection():
+    """Връща глобална CUPS връзка, или None ако CUPS не е достъпен."""
+    global _cups_conn, PPDs
+    if _cups_conn is not None:
+        return _cups_conn
+    try:
+        conn = CupsConnection()
+        PPDs = conn.getPPDs()
+        _cups_conn = conn
+        _logger.info("Connected to CUPS server successfully")
+        return _cups_conn
+    except Exception:
+        _logger.warning("Cannot connect to CUPS server, printers will not be detected", exc_info=True)
+        _cups_conn = None
+        PPDs = {}
+        return None
 
 
 class PrinterInterface(Interface):
@@ -36,6 +54,9 @@ class PrinterInterface(Interface):
     def get_devices(self):
         discovered_devices = {}
         with cups_lock:
+            conn = get_cups_connection()
+            if conn is None:
+                return {}
             printers = conn.getPrinters()
             devices = conn.getDevices()
 
@@ -229,6 +250,10 @@ class PrinterInterface(Interface):
 
         try:
             with cups_lock:
+                conn = get_cups_connection()
+                if conn is None:
+                    _logger.warning("CUPS not available, cannot auto-configure printer %s", device.get('identifier'))
+                    return
                 conn.addPrinter(name=device['identifier'], device=device['url'], **ppdname_argument)
                 conn.setPrinterInfo(device['identifier'], device['device-make-and-model'])
                 conn.enablePrinter(device['identifier'])

@@ -98,15 +98,19 @@ services:
   # CUPS - Print Server
   # ===========================================
   cups:
-    image: olbat/cupsd:latest
+    image: infra7/cups:latest
     container_name: iot-cups
     restart: unless-stopped
     ports:
       - "631:631"  # по избор, ако искаш да достъпваш CUPS UI отвън
     environment:
       - TZ=${TIMEZONE:-UTC}
+      # админ потребител/парола за CUPS, идват от .env
+      - CUPSADMIN=${CUPS_ADMIN:-admin}
+      - CUPSPASSWORD=${CUPS_PASSWORD:-changeme}
     volumes:
-      - cups-config:/etc/cups
+      # взимаме конфига от локална папка в проекта
+      - ./docker/cups/config:/etc/cups
       - cups-spool:/var/spool/cups
       - cups-log:/var/log/cups
       - cups-run:/var/run/cups

@@ -13,7 +13,7 @@ from odoo import http
 from odoo.addons.iot_drivers.connection_manager import connection_manager
 from odoo.addons.iot_drivers.controllers.proxy import proxy_drivers
 from odoo.addons.iot_drivers.iot_handlers.drivers.printer_driver_base import PrinterDriverBase
-from odoo.addons.iot_drivers.iot_handlers.interfaces.printer_interface_L import conn, cups_lock
+from odoo.addons.iot_drivers.iot_handlers.interfaces.printer_interface_L import get_cups_connection, cups_lock
 from odoo.addons.iot_drivers.main import iot_devices
 from odoo.addons.iot_drivers.tools import helpers, route, system, wifi
 from odoo.addons.iot_drivers.tools.system import IOT_IDENTIFIER
@@ -83,7 +83,11 @@ class PrinterDriver(PrinterDriverBase):
 
         try:
             with cups_lock:
-                job_id = conn.createJob(self.device_identifier, 'Odoo print job', {'document-format': CUPS_FORMAT_AUTO})
+                conn = get_cups_connection()
+                if conn is None:
+                    self.send_status(status='error', message='ERROR_CUPS_UNAVAILABLE')
+                    return
+                job_id = conn.createJob(...)
                 conn.startDocument(self.device_identifier, job_id, 'Odoo print job', CUPS_FORMAT_AUTO, 1)
                 conn.writeRequestData(data, len(data))
                 conn.finishDocument(self.device_identifier)
@@ -252,7 +256,12 @@ class PrinterDriver(PrinterDriverBase):
     def _check_job_status(self, job_id):
         try:
             with cups_lock:
-                job = conn.getJobAttributes(job_id, requested_attributes=['job-state', 'job-state-reasons', 'job-printer-state-message', 'time-at-creation'])
+                conn = get_cups_connection()
+                if conn is None:
+                    _logger.error('CUPS unavailable while checking job status')
+                    self.job_ids.remove(job_id)
+                    return
+                job = conn.getJobAttributes(...)
                 _logger.debug("job details for job id #%d: %s", job_id, job)
                 job_state = job['job-state']
                 if job_state == IPP_JOB_COMPLETED:
