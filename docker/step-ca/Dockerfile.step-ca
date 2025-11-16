@@ -15,18 +15,16 @@ RUN mkdir -p /home/step/certs \
              /home/step/secrets \
              /home/step/db
 
-# Copy scripts
+# Copy scripts (ако още ти трябват)
 COPY scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh
 
-# Връщаме се към потребителя step (както е в оригиналния образ)
-# USER step
-
-# Health check
+# Health check (по избор – може и да разчиташ само на compose healthcheck)
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD step ca health --ca-url=https://localhost:9000 || exit 1
 
 WORKDIR /home/step
 
-# Default command (will be overridden by docker-compose)
-CMD ["step-ca", "/home/step/config/ca.json"]
+# ВАЖНО: НЕ override-ваме CMD тук!
+# Оставяме оригиналния CMD/ENTRYPOINT от smallstep/step-ca
+# CMD ["step-ca"]

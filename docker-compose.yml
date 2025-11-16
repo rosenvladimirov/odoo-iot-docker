@@ -8,10 +8,7 @@ services:
   # STEP-CA - Certificate Authority
   # ===========================================
   step-ca:
-    build:
-      context: ./docker/step-ca
-      dockerfile: Dockerfile.step-ca
-
+    image: smallstep/step-ca:latest
     container_name: step-ca
     hostname: step-ca
     restart: unless-stopped
@@ -22,32 +19,16 @@ services:
     environment:
       - TZ=${TIMEZONE:-UTC}
       - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
-      - STEP_CA_NAME=${STEP_CA_NAME:-IoT Box CA}
-      - STEP_CA_PROVISIONER=${STEP_CA_PROVISIONER:-admin}
-      - STEP_CA_PASSWORD=${STEP_CA_PASSWORD:-changeme}
-      - STEP_CA_URL=https://localhost:9000
-      - RENEWAL_CHECK_INTERVAL=${RENEWAL_CHECK_INTERVAL:-86400}
 
     volumes:
-      # Persistent CA data
-      - step-ca-config:/home/step/config
-      - step-ca-certs:/home/step/certs
-      - step-ca-secrets:/home/step/secrets
-      - step-ca-db:/home/step/db
-
-      # Shared certificates with Traefik
-      - ./docker/step-ca/certs:/home/step/certs
+      # Връзваме директно локалната PKI, генерирана с step-cli
+      - ./docker/step-ca/local-pki/config:/home/step/config
+      - ./docker/step-ca/local-pki/certs:/home/step/certs
+      - ./docker/step-ca/local-pki/secrets:/home/step/secrets
+      - ./docker/step-ca/local-pki/db:/home/step/db
 
     networks:
       - iot-network
-
-    # Override на ENTRYPOINT – init, renewal daemon и step-ca
-    entrypoint: >
-      sh -c "
-        /usr/local/bin/init-ca.sh &&
-        /usr/local/bin/renewal-daemon.sh &
-        exec step-ca /home/step/config/ca.json --password-file /home/step/secrets/password.txt
-      "
 
     healthcheck:
       test: ["CMD", "curl", "-k", "-f", "https://localhost:9000/health"]
@@ -60,6 +41,22 @@ services:
       resources:
         limits:
           memory: ${STEP_CA_MEMORY_LIMIT:-256M}
+
+  # ===========================================
+  # POSTGRES - Database for Odoo IoT
+  # ===========================================
+  db:
+    image: postgres:13
+    container_name: iot-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=odoo
+      - POSTGRES_USER=odoo
+      - POSTGRES_PASSWORD=odoo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - iot-network
 
   # ===========================================
   # TRAEFIK - Reverse Proxy
@@ -86,8 +83,8 @@ services:
       - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./docker/traefik/dynamic:/etc/traefik/dynamic:ro
 
-      # Step-CA certificates
-      - ./docker/step-ca/certs:/certs:ro
+      # Step-CA certificates (ако искаш да ползваш root/intermediate от PKI)
+      - ./docker/step-ca/local-pki/certs:/certs:ro
 
       - ./logs/traefik:/var/log/traefik
 
@@ -154,8 +151,8 @@ services:
       - ${CONFIG_PATH:-./config}:/app/config
       - ${LOGS_PATH:-./logs}/iot:/app/logs
 
-      # Step-CA certificates (read-only)
-      - ./docker/step-ca/certs:/app/certs:ro
+      # Step-CA certificates (read-only) – ако искаш достъп до root/intermediate
+      - ./docker/step-ca/local-pki/certs:/app/certs:ro
 
       - iot-data:/app/data
       - /var/run/dbus:/var/run/dbus:ro
@@ -216,6 +213,8 @@ services:
     depends_on:
       traefik:
         condition: service_healthy
+      db:
+        condition: service_started
 
 # ===========================================
 # NETWORKS
@@ -234,7 +233,10 @@ volumes:
   iot-data:
     driver: local
 
-  # Step-CA persistent volumes
+  pgdata:
+    driver: local
+
+  # (Старите step-ca volumes вече не се ползват, но може да ги оставиш или да ги махнеш)
   step-ca-config:
     driver: local
   step-ca-certs:

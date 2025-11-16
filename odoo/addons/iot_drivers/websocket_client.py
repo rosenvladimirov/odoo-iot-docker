@@ -13,7 +13,11 @@ from odoo.addons.iot_drivers.tools.system import IOT_IDENTIFIER
 from odoo.addons.iot_drivers.webrtc_client import webrtc_client
 
 _logger = logging.getLogger(__name__)
-websocket.enableTrace(True, level=logging.getLevelName(_logger.getEffectiveLevel()))
+websocket.enableTrace(True)
+_logger.debug(
+    "WebSocket trace enabled at level %s",
+    logging.getLevelName(_logger.getEffectiveLevel()),
+)
 
 
 @helpers.require_db

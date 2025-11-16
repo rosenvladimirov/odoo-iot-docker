@@ -61,6 +61,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-dev \
     swig \
     python3-lxml \
+    python3-pykcs11 \
     python3-dbus \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean

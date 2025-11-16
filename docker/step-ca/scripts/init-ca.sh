@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Използваме същия STEPPATH, който виждаме в контейнера (env показва /home/step)
+# Използваме стабилен STEPPATH вътре в контейнера
 export STEPPATH=/home/step
 
 CONFIG_DIR=/home/step/config
@@ -13,14 +13,22 @@ echo "=================================================="
 echo "  Step-CA Initialization"
 echo "=================================================="
 
-# Ако вече има ca.json на очакваното място – приемаме, че CA е инициализирана
+# Ако вече има ca.json – приемаме, че CA е инициализирана
 if [ -f "${CONFIG_DIR}/ca.json" ]; then
   echo "[init-ca] Existing CA config found at ${CONFIG_DIR}/ca.json"
   echo "[init-ca] Skipping initialization."
   exit 0
 fi
 
+echo "[init-ca] No CA config found, cleaning old step state..."
+
+# Изчисти всякакви стари конфигурации на step (ако има)
+rm -rf "${STEPPATH}"/*
 mkdir -p "${CONFIG_DIR}" "${SECRETS_DIR}" "${CERTS_DIR}" "${DB_DIR}"
+
+# За да не пречи на init, игнорираме STEP_CA_URL и други client env
+unset STEP_CA_URL || true
+unset STEP_CONTEXT || true
 
 STEP_CA_NAME="${STEP_CA_NAME:-IoT Box CA}"
 IOT_DOMAIN="${IOT_DOMAIN:-iot-box.local}"
@@ -47,15 +55,15 @@ step ca init \
   --deployment-type standalone \
   --remote-management=false
 
-# При STEPPATH=/home/step, step ca init ще ползва:
-#   certs:  /home/step/certs
-#   secrets:/home/step/secrets
-#   db:     /home/step/db
-#   config: /home/step/config/ca.json
+# Проверяваме дали конфигът е създаден където очакваме
 if [ -f "${CONFIG_DIR}/ca.json" ]; then
   echo "[init-ca] CA config is at ${CONFIG_DIR}/ca.json"
 else
   echo "[init-ca] ERROR: Expected CA config at ${CONFIG_DIR}/ca.json not found!"
+  echo "[init-ca] step path is:"
+  step path || true
+  echo "[init-ca] Contents of ${STEPPATH}:"
+  ls -R "${STEPPATH}" || true
   exit 1
 fi
 

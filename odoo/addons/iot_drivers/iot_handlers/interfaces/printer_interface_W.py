@@ -2,9 +2,14 @@
 
 import logging
 from threading import Lock
-import win32print
 
 from odoo.addons.iot_drivers.interface import Interface
+from odoo.addons.iot_drivers.tools.system import IS_WINDOWS
+
+if IS_WINDOWS:
+    import win32print
+else:
+    raise ImportError("printer_interface_W is only supported on Windows")
 
 _logger = logging.getLogger(__name__)
 

@@ -8,7 +8,7 @@ from odoo import http
 from odoo.tools.config import config
 from odoo.addons.iot_drivers.tools import route
 
-from .l10n_eg_drivers import UsbTokenService
+from odoo.addons.iot_drivers.iot_handlers.drivers.l10n_eg_drivers import UsbTokenService
 
 _logger = logging.getLogger(__name__)
 
@@ -84,7 +84,7 @@ class EtaUsbUiController(http.Controller):
         super().__init__()
         self._usb_service = UsbTokenService()
 
-    @http.route('/iot_drivers/eta_usb/status', type='json', auth='none', methods=['POST'])
+    @http.route('/iot_drivers/eta_usb/status', type='jsonrpc', auth='none', methods=['POST'])
     def eta_usb_status(self, pin=None, **_kwargs):
         """Статус на USB токена за UI.
 
@@ -94,7 +94,7 @@ class EtaUsbUiController(http.Controller):
         status = self._usb_service.quick_status(pin)
         return status
 
-    @http.route('/iot_drivers/eta_usb/test_sign', type='json', auth='none', methods=['POST'])
+    @http.route('/iot_drivers/eta_usb/test_sign', type='jsonrpc', auth='none', methods=['POST'])
     def eta_usb_test_sign(self, pin=None, **_kwargs):
         """Тестово подписване за UI.
 

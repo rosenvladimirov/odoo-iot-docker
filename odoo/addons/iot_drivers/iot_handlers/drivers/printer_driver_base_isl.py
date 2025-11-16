@@ -8,10 +8,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Any
 
-from odoo.addons.iot_drivers.iot_handlers.drivers.serial_base_driver import (
-    SerialDriver,
-)
-from odoo.addons.iot_drivers.main import iot_devices
+from .serial_base_driver import SerialDriver
+from ...main import iot_devices
 
 _logger = logging.getLogger(__name__)
 
