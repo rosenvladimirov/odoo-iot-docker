@@ -61,15 +61,10 @@ services:
       - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
 
     volumes:
-      # Монтираме цялата локална PKI, генерирана от step-ca-init
       - ./docker/step-ca/local-pki:/home/step
 
     networks:
       - iot-network
-
-    # step-ca ще чете /home/step/config/ca.json и /home/step/secrets/password
-    entrypoint: >
-      sh -c "exec step-ca /home/step/config/ca.json"
 
     healthcheck:
       test: ["CMD", "curl", "-k", "-f", "https://localhost:9000/health"]
@@ -87,7 +82,7 @@ services:
   # POSTGRES - Database for Odoo IoT
   # ===========================================
   db:
-    image: postgres:13
+    image: postgres:17
     container_name: iot-postgres
     restart: unless-stopped
     environment:
@@ -96,6 +91,25 @@ services:
       - POSTGRES_PASSWORD=odoo
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - iot-network
+
+  # ===========================================
+  # CUPS - Print Server
+  # ===========================================
+  cups:
+    image: olbat/cupsd:latest
+    container_name: iot-cups
+    restart: unless-stopped
+    ports:
+      - "631:631"  # по избор, ако искаш да достъпваш CUPS UI отвън
+    environment:
+      - TZ=${TIMEZONE:-UTC}
+    volumes:
+      - cups-config:/etc/cups
+      - cups-spool:/var/spool/cups
+      - cups-log:/var/log/cups
+      - cups-run:/var/run/cups
     networks:
       - iot-network
 
@@ -123,23 +137,16 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./docker/traefik/dynamic:/etc/traefik/dynamic:ro
-
-      # Step-CA certificates (root/intermediate от PKI)
       - ./docker/step-ca/local-pki/certs:/certs:ro
-
       - ./logs/traefik:/var/log/traefik
 
     labels:
       - "traefik.enable=true"
-
-      # Dashboard
       - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.${IOT_DOMAIN:-iot-box.local}`)"
       - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
       - "traefik.http.routers.traefik-dashboard.tls=true"
       - "traefik.http.routers.traefik-dashboard.service=api@internal"
       - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth"
-
-      # Dashboard auth
       - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_USER:-admin}:${TRAEFIK_DASHBOARD_PASSWORD:-$$apr1$$xyz}"
 
     networks:
@@ -164,12 +171,7 @@ services:
   # IOT BOX - Main Application
   # ===========================================
   iot-box:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
-      args:
-        IOT_VERSION: "1.0.0"
-
+    image: odoo-iot-box:1.0.0
     container_name: odoo-iot-box
     hostname: ${IOT_IDENTIFIER:-iot-box}
     restart: unless-stopped
@@ -191,13 +193,11 @@ services:
     volumes:
       - ${CONFIG_PATH:-./config}:/app/config
       - ${LOGS_PATH:-./logs}/iot:/app/logs
-
-      # Step-CA certificates (read-only)
       - ./docker/step-ca/local-pki/certs:/app/certs:ro
-
       - iot-data:/app/data
       - /var/run/dbus:/var/run/dbus:ro
-      - /var/run/cups:/var/run/cups:ro
+      # вместо хостския /var/run/cups, ползваме този от cups контейнера
+      - cups-run:/var/run/cups:ro
       - /etc/NetworkManager/system-connections:/etc/NetworkManager/system-connections
 
     environment:
@@ -214,24 +214,16 @@ services:
 
     labels:
       - "traefik.enable=true"
-
-      # HTTP -> HTTPS redirect
       - "traefik.http.routers.iot-http.rule=Host(`${IOT_DOMAIN:-iot-box.local}`)"
       - "traefik.http.routers.iot-http.entrypoints=web"
       - "traefik.http.routers.iot-http.middlewares=https-redirect@file"
-
-      # HTTPS Router
       - "traefik.http.routers.iot-https.rule=Host(`${IOT_DOMAIN:-iot-box.local}`)"
       - "traefik.http.routers.iot-https.entrypoints=websecure"
       - "traefik.http.routers.iot-https.tls=true"
       - "traefik.http.routers.iot-https.middlewares=iot-chain@file"
-
-      # Service
-      - "traefik.http.services.iot-service.loadbalancer.server.port=8069"
-
-      # Health check
-      - "traefik.http.services.iot-service.loadbalancer.healthcheck.path=/hw_proxy/hello"
-      - "traefik.http.services.iot-service.loadbalancer.healthcheck.interval=30s"
+      - "traефик.http.services.iot-service.loadbalancer.server.port=8069"
+      - "traефик.http.services.iot-service.loadbalancer.healthcheck.path=/hw_proxy/hello"
+      - "traефик.http.services.iot-service.loadbalancer.healthcheck.interval=30s"
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8069/hw_proxy/hello"]
@@ -256,6 +248,8 @@ services:
         condition: service_healthy
       db:
         condition: service_started
+      cups:
+        condition: service_started
 
 # ===========================================
 # NETWORKS
@@ -275,4 +269,13 @@ volumes:
     driver: local
 
   pgdata:
+    driver: local
+
+  cups-config:
+    driver: local
+  cups-spool:
+    driver: local
+  cups-log:
+    driver: local
+  cups-run:
     driver: local

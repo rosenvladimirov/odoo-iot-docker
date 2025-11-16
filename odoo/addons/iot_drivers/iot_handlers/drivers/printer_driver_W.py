@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 from escpos import printer
 import escpos.exceptions
 import io
-import win32print
-import pywintypes
-import ghostscript
+
+if IS_WINDOWS:
+    import win32print
+    import pywintypes
+    import ghostscript
 
 from odoo.addons.iot_drivers.controllers.proxy import proxy_drivers
 from odoo.addons.iot_drivers.iot_handlers.drivers.printer_driver_base import PrinterDriverBase

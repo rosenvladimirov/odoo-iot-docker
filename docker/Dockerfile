@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     python3-venv \
     iputils-ping \
+    wlr-randr \
     net-tools \
     iproute2 \
     dbus \
@@ -60,6 +61,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libswresample-dev \
     libglib2.0-dev \
     swig \
+    python3-pyudev \
     python3-lxml \
     python3-pykcs11 \
     python3-dbus \
@@ -83,6 +85,8 @@ COPY --chown=iotbox:iotbox ./odoo /app/
 # === ENTRYPOINT ===
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+COPY docker/iot_init_db.sh /docker/iot_init_db.sh
+RUN chmod +x /docker/iot_init_db.sh
 
 # === VOLUMES ===
 VOLUME ["/app/config", "/app/logs", "/app/certs", "/app/data"]

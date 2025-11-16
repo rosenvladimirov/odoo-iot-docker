@@ -3,6 +3,7 @@
 import logging
 import re
 import subprocess
+import shutil
 
 from odoo.addons.iot_drivers.interface import Interface
 
@@ -14,6 +15,10 @@ class DisplayInterface(Interface):
     connection_type = 'display'
 
     def get_devices(self):
+        if not shutil.which("wlr-randr"):
+            _logger.warning("wlr-randr not found in PATH, no display devices will be detected")
+            return {}
+
         randr_result = subprocess.run(['wlr-randr'], capture_output=True, text=True, check=False)
         if randr_result.returncode != 0:
             return {}
