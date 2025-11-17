@@ -49,10 +49,6 @@ services:
     hostname: step-ca
     restart: unless-stopped
 
-    depends_on:
-      step-ca-init:
-        condition: service_completed_successfully
-
     ports:
       - "${STEP_CA_PORT:-9000}:9000"
 
@@ -121,7 +117,7 @@ services:
   # TRAEFIK - Reverse Proxy
   # ===========================================
   traefik:
-    image: traefik:v2.10
+    image: traefik:latest
     container_name: iot-traefik
     restart: unless-stopped
 
