@@ -1,0 +1,74 @@
+---
+# ============================================
+# ODOO IOT BOX WITH STEP-CA & TRAEFIK
+# ============================================
+
+services:
+  # ===========================================
+  # STEP-CA INIT - еднократна инициализация на PKI
+  # ===========================================
+  step-ca-init:
+    image: smallstep/step-cli:latest
+    container_name: step-ca-init
+    user: "0:0"
+    restart: "no"
+    environment:
+      - STEP_CA_PASSWORD=${STEP_CA_PASSWORD:-changeme}
+      - STEP_CA_NAME=${STEP_CA_NAME:-IoT Box CA}
+      - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
+      - STEP_CA_PROVISIONER=${STEP_CA_PROVISIONER:-admin}
+    volumes:
+      - ./docker/step-ca/local-pki:/home/step
+    command: >
+      sh -c "
+        mkdir -p /home/step/secrets &&
+        if [ ! -f /home/step/secrets/password ]; then
+          echo \"$STEP_CA_PASSWORD\" > /home/step/secrets/password &&
+          chmod 600 /home/step/secrets/password;
+        fi &&
+        if [ -f /home/step/config/ca.json ]; then
+          echo 'CA already initialized, skipping step ca init';
+          exit 0;
+        fi &&
+        mkdir -p /home/step/config /home/step/certs /home/step/db &&
+        step ca init
+          --name \"$STEP_CA_NAME\"
+          --dns \"$IOT_DOMAIN\"
+          --address \":9000\"
+          --provisioner \"$STEP_CA_PROVISIONER\"
+          --password-file /home/step/secrets/password &&
+        chown -R 1000:1000 /home/step
+      "
+  # ===========================================
+  # STEP-CA - Certificate Authority
+  # ===========================================
+  step-ca:
+    image: smallstep/step-ca:latest
+    container_name: step-ca
+    hostname: step-ca
+    restart: unless-stopped
+
+    ports:
+      - "${STEP_CA_PORT:-9000}:9000"
+
+    environment:
+      - TZ=${TIMEZONE:-UTC}
+      - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
+
+    volumes:
+      - ./docker/step-ca/local-pki:/home/step
+
+    networks:
+      - iot-network
+
+    healthcheck:
+      test: ["CMD", "curl", "-k", "-f", "https://localhost:9000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    deploy:
+      resources:
+        limits:
+          memory: ${STEP_CA_MEMORY_LIMIT:-256M}
