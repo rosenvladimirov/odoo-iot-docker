@@ -1,3 +1,4 @@
+
 ---
 # ============================================
 # ODOO IOT BOX WITH STEP-CA & TRAEFIK
@@ -12,7 +13,6 @@ services:
     container_name: step-ca
     hostname: step-ca
     restart: unless-stopped
-    user: "0:0"
 
     ports:
       - "${STEP_CA_PORT:-9000}:9000"
@@ -20,19 +20,23 @@ services:
     environment:
       - TZ=${TIMEZONE:-UTC}
       - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
+      - DOCKER_STEPCA_INIT_NAME=IoT Box CA
+      - DOCKER_STEPCA_INIT_DNS_NAMES=step-ca,localhost,iot-box.local
+      - DOCKER_STEPCA_INIT_PROVISIONER_NAME=admin
+      - DOCKER_STEPCA_INIT_PASSWORD=${STEP_CA_PASSWORD:-changeme-secure-password-here}
 
     volumes:
-      - ${STEP_CA_PATH:-./docker/step-ca/local-pki}:/home/step
+      - step-ca-data:/home/step
 
     networks:
       - iot-network
 
     healthcheck:
-      test: ["CMD", "curl", "-k", "-f", "https://localhost:9000/health"]
+      test: ["CMD", "curl", "-kf", "https://localhost:9000/health"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      start_period: 20s
 
     deploy:
       resources:
@@ -51,7 +55,7 @@ services:
       - POSTGRES_USER=odoo
       - POSTGRES_PASSWORD=odoo
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
     networks:
       - iot-network
 
@@ -63,17 +67,15 @@ services:
     container_name: iot-cups
     restart: unless-stopped
     ports:
-      - "631:631"  # по избор, ако искаш да достъпваш CUPS UI отвън
+      - "631:631"
     environment:
       - TZ=${TIMEZONE:-UTC}
-      # админ потребител/парола за CUPS, идват от .env
       - CUPSADMIN=${CUPS_ADMIN:-admin}
       - CUPSPASSWORD=${CUPS_PASSWORD:-changeme}
     volumes:
-      # взимаме конфига от локална папка в проекта
-      - ./docker/cups/config:/etc/cups
+      - cups-config:/etc/cups
       - cups-spool:/var/spool/cups
-      - cups-log:/var/log/cups
+      - cups-logs:/var/log/cups
       - cups-run:/var/run/cups
     networks:
       - iot-network
@@ -102,12 +104,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./docker/traefik/dynamic:/etc/traefik/dynamic:ro
-      - ${STEP_CA_CERTS_PATH:-./docker/step-ca/local-pki/certs}:/certs:ro
-      - ./logs/traefik:/var/log/traefik
+      - step-ca-data:/step-ca:ro
+      - traefik-logs:/var/log/traefik
 
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=odoo-iot-docker_iot-network"
+      - "traefik.docker.network=iot-network"
       - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.${IOT_DOMAIN:-iot-box.local}`)"
       - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
       - "traefik.http.routers.traefik-dashboard.tls=true"
@@ -133,6 +135,7 @@ services:
         limits:
           memory: ${TRAEFIK_MEMORY_LIMIT:-128M}
 
+
   # ===========================================
   # IOT BOX - Main Application
   # ===========================================
@@ -157,12 +160,11 @@ services:
       - /dev/rfkill:/dev/rfkill
 
     volumes:
-      - ${CONFIG_PATH:-./docker/config}:/app/config
-      - ${LOGS_PATH:-./logs}/iot:/app/logs
-      - ${STEP_CA_CERTS_PATH:-./docker/step-ca/local-pki/certs}:/app/certs:ro
-      - ${DATA_PATH:-./data}:/app/data
+      - ./docker/config:/app/config:ro
+      - iot-logs:/app/logs
+      - step-ca-data:/app/step-ca:ro
+      - iot-data:/app/data
       - /var/run/dbus:/var/run/dbus:ro
-      # вместо хостския /var/run/cups, ползваме този от cups контейнера
       - cups-run:/var/run/cups:ro
       - /etc/NetworkManager/system-connections:/etc/NetworkManager/system-connections
 
@@ -180,7 +182,7 @@ services:
 
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=odoo-iot-docker_iot-network"
+      - "traefik.docker.network=iot-network"
       - "traefik.http.routers.iot-http.rule=Host(`${IOT_DOMAIN:-iot-box.local}`)"
       - "traefik.http.routers.iot-http.entrypoints=web"
       - "traefik.http.routers.iot-http.middlewares=https-redirect@file"
@@ -223,26 +225,31 @@ services:
 # ===========================================
 networks:
   iot-network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16
+    external: true
 
 # ===========================================
 # VOLUMES
 # ===========================================
 volumes:
-  iot-data:
-    driver: local
+  step-ca-data:
+    external: true
 
-  pgdata:
-    driver: local
+  postgres-data:
+    external: true
 
   cups-config:
-    driver: local
+    external: true
   cups-spool:
-    driver: local
-  cups-log:
-    driver: local
+    external: true
+  cups-logs:
+    external: true
   cups-run:
-    driver: local
+    external: true
+
+  traefik-logs:
+    external: true
+
+  iot-logs:
+    external: true
+  iot-data:
+    external: true
