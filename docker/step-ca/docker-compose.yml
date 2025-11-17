@@ -59,7 +59,7 @@ services:
       - ./docker/step-ca/local-pki:/home/step
 
     networks:
-      - iot-network
+      - odoo-iot-docker_iot-network
 
     healthcheck:
       test: ["CMD", "curl", "-k", "-f", "https://localhost:9000/health"]
@@ -72,3 +72,7 @@ services:
       resources:
         limits:
           memory: ${STEP_CA_MEMORY_LIMIT:-256M}
+
+networks:
+  odoo-iot-docker_iot-network:
+    external: true

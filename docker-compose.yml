@@ -12,6 +12,7 @@ services:
     container_name: step-ca
     hostname: step-ca
     restart: unless-stopped
+    user: "0:0"
 
     ports:
       - "${STEP_CA_PORT:-9000}:9000"
@@ -21,7 +22,7 @@ services:
       - IOT_DOMAIN=${IOT_DOMAIN:-iot-box.local}
 
     volumes:
-      - ./docker/step-ca/local-pki:/home/step
+      - ${STEP_CA_PATH:-./docker/step-ca/local-pki}:/home/step
 
     networks:
       - iot-network
@@ -101,11 +102,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./docker/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
       - ./docker/traefik/dynamic:/etc/traefik/dynamic:ro
-      - ./docker/step-ca/local-pki/certs:/certs:ro
+      - ${STEP_CA_CERTS_PATH:-./docker/step-ca/local-pki/certs}:/certs:ro
       - ./logs/traefik:/var/log/traefik
 
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=odoo-iot-docker_iot-network"
       - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.${IOT_DOMAIN:-iot-box.local}`)"
       - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
       - "traefik.http.routers.traefik-dashboard.tls=true"
@@ -155,10 +157,10 @@ services:
       - /dev/rfkill:/dev/rfkill
 
     volumes:
-      - ${CONFIG_PATH:-./config}:/app/config
+      - ${CONFIG_PATH:-./docker/config}:/app/config
       - ${LOGS_PATH:-./logs}/iot:/app/logs
-      - ./docker/step-ca/local-pki/certs:/app/certs:ro
-      - iot-data:/app/data
+      - ${STEP_CA_CERTS_PATH:-./docker/step-ca/local-pki/certs}:/app/certs:ro
+      - ${DATA_PATH:-./data}:/app/data
       - /var/run/dbus:/var/run/dbus:ro
       # вместо хостския /var/run/cups, ползваме този от cups контейнера
       - cups-run:/var/run/cups:ro
@@ -178,6 +180,7 @@ services:
 
     labels:
       - "traefik.enable=true"
+      - "traefik.docker.network=odoo-iot-docker_iot-network"
       - "traefik.http.routers.iot-http.rule=Host(`${IOT_DOMAIN:-iot-box.local}`)"
       - "traefik.http.routers.iot-http.entrypoints=web"
       - "traefik.http.routers.iot-http.middlewares=https-redirect@file"
@@ -185,9 +188,9 @@ services:
       - "traefik.http.routers.iot-https.entrypoints=websecure"
       - "traefik.http.routers.iot-https.tls=true"
       - "traefik.http.routers.iot-https.middlewares=iot-chain@file"
-      - "traефик.http.services.iot-service.loadbalancer.server.port=8069"
-      - "traефик.http.services.iot-service.loadbalancer.healthcheck.path=/hw_proxy/hello"
-      - "traефик.http.services.iot-service.loadbalancer.healthcheck.interval=30s"
+      - "traefik.http.services.iot-service.loadbalancer.server.port=8069"
+      - "traefik.http.services.iot-service.loadbalancer.healthcheck.path=/hw_proxy/hello"
+      - "traefik.http.services.iot-service.loadbalancer.healthcheck.interval=30s"
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8069/hw_proxy/hello"]
