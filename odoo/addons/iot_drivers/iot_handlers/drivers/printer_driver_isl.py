@@ -70,6 +70,7 @@ class IslIcpFiscalPrinterDriver(IslFiscalPrinterBase):
 
     _protocol = IcpSerialProtocol
     device_type = "fiscal_printer"
+    priority = 30
 
     SERIAL_NUMBER_PREFIX = "IS"
 
@@ -177,13 +178,6 @@ class IslIcpFiscalPrinterDriver(IslFiscalPrinterBase):
         except Exception as e:
             _logger.debug(f"Failed to parse ISL device info: {e}")
             return None
-
-    # ---------------------- Поддръжка / избор на устройство ----------------------
-
-    @classmethod
-    def supported(cls, device):
-        """При нужда тук може да се добави реален probe към ICP. Засега True."""
-        return True
 
     # get_default_device наследяваме от базата, ако не искаш нищо специално.
 

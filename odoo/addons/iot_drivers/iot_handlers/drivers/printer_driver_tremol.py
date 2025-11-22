@@ -119,7 +119,6 @@ TremolBGProtocol = SerialProtocol(
 
 
 # ====================== Tremol native драйвер (не ISL) ======================
-
 class TremolFiscalPrinterDriver(SerialDriver):
     """
     IoT драйвер за български фискален принтер Tremol.
@@ -130,6 +129,7 @@ class TremolFiscalPrinterDriver(SerialDriver):
     """
 
     _protocol = TremolBGProtocol
+    priority = 20  # По-нисък приоритет от Datecs
 
     def __init__(self, identifier, device):
         super().__init__(identifier, device)
@@ -874,12 +874,6 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
         }
 
     # ---------------------- Поддръжка / избор на устройство ----------------------
-
-    @classmethod
-    def supported(cls, device):
-        """По желание – реален probe за Tremol ISL. Засега True."""
-        return True
-
     @classmethod
     def get_default_device(cls):
         devices = [

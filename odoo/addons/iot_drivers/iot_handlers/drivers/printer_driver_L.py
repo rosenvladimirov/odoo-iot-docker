@@ -1,6 +1,8 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 from base64 import b64decode
+
+import cups
 from cups import IPPError, IPP_JOB_COMPLETED, IPP_JOB_PROCESSING, IPP_JOB_PENDING, CUPS_FORMAT_AUTO
 from escpos import printer
 from escpos.escpos import EscposIO
@@ -74,27 +76,33 @@ class PrinterDriver(PrinterDriverBase):
         super().disconnect()
 
     def print_raw(self, data):
-        """Print raw data to the printer
-
-        :param data: The data to print
         """
-        if not self.check_printer_status():
-            return
-
+        Prints raw ESC/POS commands through CUPS
+        """
         try:
-            with cups_lock:
-                conn = get_cups_connection()
-                if conn is None:
-                    self.send_status(status='error', message='ERROR_CUPS_UNAVAILABLE')
-                    return
-                job_id = conn.createJob(...)
-                conn.startDocument(self.device_identifier, job_id, 'Odoo print job', CUPS_FORMAT_AUTO, 1)
-                conn.writeRequestData(data, len(data))
-                conn.finishDocument(self.device_identifier)
-            self.job_ids.append(job_id)
-        except IPPError:
-            _logger.exception("Printing failed")
-            self.send_status(status='error', message='ERROR_FAILED')
+            conn = cups.Connection()
+
+            # Вариант 1: Използвай printFile (по-прост)
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.bin') as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
+
+            try:
+                job_id = conn.printFile(
+                    self.dev_name,
+                    tmp_path,
+                    "IoT Print Job",
+                    {'raw': 'True'}
+                )
+                _logger.info(f'Print job {job_id} sent to {self.dev_name}')
+            finally:
+                import os
+                os.unlink(tmp_path)
+
+        except Exception as e:
+            _logger.exception('Error printing raw data')
+            raise
 
     @classmethod
     def format_star(cls, im):
@@ -130,21 +138,25 @@ class PrinterDriver(PrinterDriverBase):
 
         return {"identifier": identifier, "mac_address": mac_address, "pairing_code": pairing_code, "ssid": ssid, "ips": ips}
 
-    def print_status(self, data=None):
-        """Prints the status ticket of the IoT Box on the current printer.
+    def print_status(self):
+        try:
+            title = b'*** Printer Status ***\r\n'
 
-        :param data: If not None, it means that it has been called from the action route, meaning
-        that no matter the connection type, the printer should print the status ticket.
-        """
-        if not self.connected_by_usb and not data:
-            return
-        if self.device_subtype == "receipt_printer":
-            self.print_status_receipt()
-        elif self.device_subtype == "label_printer":
-            self.print_status_zpl()
-        else:
-            title, body = self._printer_status_content()
-            self.print_raw(title + b'\r\n' + body.decode().replace('\n', '\r\n').encode())
+            body_lines = [
+                f"Printer: {self.device_name}",
+                f"Type: {self.device_type}",
+                f"Status: {self._status['status']}",
+            ]
+
+            if self._status.get('messages'):
+                body_lines.append(f"Messages: {', '.join(self._status['messages'])}")
+
+            body = '\r\n'.join(body_lines).encode('utf-8')
+
+            self.print_raw(title + body + b'\r\n\r\n')
+
+        except Exception as e:
+            _logger.exception('Error printing status')
 
     def print_status_receipt(self):
         """Prints the status ticket of the IoT Box on the current printer."""

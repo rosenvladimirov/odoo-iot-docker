@@ -69,7 +69,6 @@ IncotexIslProtocol = SerialProtocol(
 
 
 # ====================== Incotex ISL драйвер ======================
-
 class IncotexIslFiscalPrinterDriver(IslFiscalPrinterBase):
     """
     IoT драйвер за фискален принтер Incotex (ISL).
@@ -87,6 +86,7 @@ class IncotexIslFiscalPrinterDriver(IslFiscalPrinterBase):
 
     _protocol = IncotexIslProtocol
     device_type = "fiscal_printer"
+    priority = 35
 
     SERIAL_NUMBER_PREFIX = "IN"
 
@@ -253,12 +253,6 @@ class IncotexIslFiscalPrinterDriver(IslFiscalPrinterBase):
             "ok": status.ok,
             "messages": [m.text for m in (status.messages + status.errors)],
         }
-
-    # ---------------------- Поддръжка / избор на устройство ----------------------
-
-    @classmethod
-    def supported(cls, device):
-        return True
 
     # ---------------------- Ниско ниво ISL ----------------------
 

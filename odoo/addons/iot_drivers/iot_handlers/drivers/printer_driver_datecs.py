@@ -54,6 +54,7 @@ class DatecsIslFiscalPrinterDriver(IslFiscalPrinterBase):
     device_type = "fiscal_printer"
     device_connection = "serial"
     device_name = "Datecs ISL Fiscal Printer"
+    priority = 10
 
     # ISL frame константи (както в BgIslFiscalPrinter.Frame.cs)
     MARKER_SPACE = 0x20
@@ -67,6 +68,10 @@ class DatecsIslFiscalPrinterDriver(IslFiscalPrinterBase):
     MAX_SEQUENCE_NUMBER = 0x7F - MARKER_SPACE  # както в C#
     MAX_WRITE_RETRIES = 6
     MAX_READ_RETRIES = 200
+
+    # Команди (наследени от базата, но добавяме явно ако ги използваме в detect_device)
+    CMD_STATUS = 0x4A  # Наследява се от базата, но добавяме за яснота
+    CMD_DEVICE_INFO = 0x5A  # Наследява се от базата
 
     # Serial протокол (съвместим с Datecs ISL)
     _protocol = SerialProtocol(
@@ -549,16 +554,6 @@ class DatecsIslFiscalPrinterDriver(IslFiscalPrinterBase):
         }
 
     # ====================== Поддръжка / избор на устройство ======================
-
-    @classmethod
-    def supported(cls, device):
-        """
-        TODO: Datecs-специфичен probe (USB VID/PID, product string, първи ISL ping и т.н.).
-
-        Засега връщаме True, за да може драйверът да се използва експериментално.
-        """
-        return True
-
     @classmethod
     def get_default_device(cls):
         devices = [

@@ -62,7 +62,6 @@ DaisyIslProtocol = SerialProtocol(
 
 
 # ====================== Daisy ISL драйвер ======================
-
 class DaisyIslFiscalPrinterDriver(IslFiscalPrinterBase):
     """
     IoT драйвер за български фискален принтер Daisy (ISL).
@@ -256,8 +255,10 @@ class DaisyIslFiscalPrinterDriver(IslFiscalPrinterBase):
 
     @classmethod
     def supported(cls, device):
-        """Тук може да добавиш реално Daisy‑специфично „probe“. Засега True."""
-        return True
+        """
+        Използва базовия механизъм с detect_device().
+        """
+        return super().supported(device)
 
     @classmethod
     def get_default_device(cls):

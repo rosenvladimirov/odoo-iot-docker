@@ -2,7 +2,6 @@
 # ============================================
 # ODOO IOT BOX WITH STEP-CA & TRAEFIK
 # ============================================
-
 services:
   # ===========================================
   # STEP-CA - Certificate Authority
@@ -143,6 +142,9 @@ services:
     container_name: odoo-iot-box
     hostname: ${IOT_IDENTIFIER:-iot-box}
     restart: unless-stopped
+    user: "root"
+    group_add:
+      - dialout
 
     networks:
       - iot-network
@@ -150,13 +152,13 @@ services:
     cap_add:
       - NET_ADMIN
       - NET_RAW
+      - SYS_ADMIN
 
+    # За development - може privileged
     privileged: true
 
     devices:
-      - /dev/bus/usb:/dev/bus/usb
       - /dev:/dev
-      - /dev/rfkill:/dev/rfkill
 
     volumes:
       - ./docker/config:/app/config:ro
@@ -166,6 +168,7 @@ services:
       - /var/run/dbus:/var/run/dbus:ro
       - cups-run:/var/run/cups:ro
       - /etc/NetworkManager/system-connections:/etc/NetworkManager/system-connections
+      - /run/udev:/run/udev:ro
 
     environment:
       - IOT_IN_DOCKER=true

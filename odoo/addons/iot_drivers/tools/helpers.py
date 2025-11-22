@@ -1,5 +1,5 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
-
+import sys
 from enum import Enum
 from functools import cache, wraps
 from importlib import util
@@ -211,6 +211,9 @@ def load_iot_handlers():
         path = file_path(f'iot_drivers/iot_handlers/{directory}')
         filesList = get_handlers_files_to_load(path)
         for file in filesList:
+            if file.endswith('_W.py') and sys.platform != 'win32':
+                _logger.debug('Skipping Windows-specific driver: %s', file)
+                continue
             spec = util.spec_from_file_location(compute_iot_handlers_addon_name(directory, file), str(Path(path).joinpath(file)))
             if spec:
                 module = util.module_from_spec(spec)

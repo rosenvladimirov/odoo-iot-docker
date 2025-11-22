@@ -34,21 +34,43 @@ class Interface(Thread):
     def add_device(self, identifier, device):
         if identifier in iot_devices:
             return
-        supported_driver = next(
-            (driver for driver in self.drivers if driver.supported(device)),
-            None
-        )
+
+        try:
+            supported_driver = next(
+                (driver for driver in self.drivers if driver.supported(device)),
+                None
+            )
+        except Exception as e:
+            _logger.exception("❌ Error checking driver support for device %s: %s", identifier, e)
+            supported_driver = None
+
         if supported_driver:
-            _logger.info('Device %s is now connected', identifier)
-            if identifier in unsupported_devices:
-                del unsupported_devices[identifier]
-            d = supported_driver(identifier, device)
-            iot_devices[identifier] = d
-            # Start the thread after creating the iot_devices entry so the
-            # thread can assume the iot_devices entry will exist while it's
-            # running, at least until the `disconnect` above gets triggered
-            # when `removed` is not empty.
-            d.start()
+            try:
+                _logger.info('Device %s is now connected', identifier)
+                if identifier in unsupported_devices:
+                    del unsupported_devices[identifier]
+                d = supported_driver(identifier, device)
+                iot_devices[identifier] = d
+                # Start the thread after creating the iot_devices entry so the
+                # thread can assume the iot_devices entry will exist while it's
+                # running, at least until the `disconnect` above gets triggered
+                # when `removed` is not empty.
+                d.start()
+            except Exception as e:
+                _logger.exception("❌ Failed to initialize driver %s for device %s", supported_driver.__name__,
+                                  identifier)
+                # Премахваме от iot_devices ако е било добавено
+                if identifier in iot_devices:
+                    del iot_devices[identifier]
+                # Добавяме като unsupported
+                if self.allow_unsupported:
+                    unsupported_devices[identifier] = {
+                        'name': f'Failed device ({self.connection_type})',
+                        'identifier': identifier,
+                        'type': 'error',
+                        'connection': 'direct' if self.connection_type == 'usb' else self.connection_type,
+                        'error': str(e),
+                    }
         elif self.allow_unsupported and identifier not in unsupported_devices:
             _logger.info('Unsupported device %s is now connected', identifier)
             unsupported_devices[identifier] = {

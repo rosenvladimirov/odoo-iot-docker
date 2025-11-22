@@ -1103,14 +1103,75 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
 
     @classmethod
     def supported(cls, device):
-        """Може да се override-не с реално „probe“; по подразбиране True."""
-        return True
+        """
+        Проверява дали този драйвер поддържа устройството.
 
-    @classmethod
-    def get_default_device(cls):
-        devices = [
-            iot_devices[d]
-            for d in iot_devices
-            if getattr(iot_devices[d], "device_type", None) == "fiscal_printer"
-        ]
-        return devices[0] if devices else None
+        Args:
+            device: Може да е string (port path) или dict с device info
+        """
+        # Ако това е базовият клас - не поддържа нищо
+        if cls.__name__ == 'IslFiscalPrinterBase':
+            return False
+
+        # Ако няма detect_device метод - не може да детектира
+        if not hasattr(cls, 'detect_device'):
+            _logger.debug(f"{cls.__name__}: No detect_device method")
+            return False
+
+        # Извлечи port path от device
+        if isinstance(device, str):
+            port = device
+        elif isinstance(device, dict):
+            port = device.get('port') or device.get('device')
+        else:
+            _logger.debug(f"{cls.__name__}: Unknown device type: {type(device)}")
+            return False
+
+        if not port or not isinstance(port, str):
+            return False
+
+        # Провери дали е serial port
+        if not port.startswith('/dev/tty'):
+            return False
+
+        _logger.debug(f"{cls.__name__}: Trying to detect on {port}")
+
+        try:
+            import serial
+
+            # Вземи baudrate от protocol или default
+            baudrate = 115200
+            if hasattr(cls, '_protocol') and hasattr(cls._protocol, 'baudrate'):
+                baudrate = cls._protocol.baudrate
+
+            connection = serial.Serial(
+                port=port,
+                baudrate=baudrate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=0.5,
+                write_timeout=0.5,
+            )
+
+            try:
+                connection.reset_input_buffer()
+                connection.reset_output_buffer()
+
+                # Викай detect_device
+                device_info = cls.detect_device(connection, baudrate)
+
+                if device_info:
+                    _logger.info(f"✅ {cls.__name__} detected device on {port}")
+                    return True
+                else:
+                    _logger.debug(f"{cls.__name__}: No device detected on {port}")
+                    return False
+
+            finally:
+                connection.close()
+
+        except Exception as e:
+            _logger.debug(f"{cls.__name__}: Detection failed on {port}: {e}")
+            return False
+

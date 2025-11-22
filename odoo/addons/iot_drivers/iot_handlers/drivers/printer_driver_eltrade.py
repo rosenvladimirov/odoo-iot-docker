@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from typing import Dict, Optional, Tuple, List, Any
-
 from odoo.addons.iot_drivers.iot_handlers.drivers.serial_base_driver import (
     SerialProtocol,
 )
@@ -77,6 +76,7 @@ class EltradeIslFiscalPrinterDriver(IslFiscalPrinterBase):
 
     _protocol = EltradeIslProtocol
     device_type = "fiscal_printer"
+    priority = 25
 
     SERIAL_NUMBER_PREFIX = "ED"
 
@@ -252,13 +252,6 @@ class EltradeIslFiscalPrinterDriver(IslFiscalPrinterBase):
             "ok": status.ok,
             "messages": [m.text for m in (status.messages + status.errors)],
         }
-
-    # ---------------------- Поддръжка / избор на устройство ----------------------
-
-    @classmethod
-    def supported(cls, device):
-        """При нужда тук може да се добави реален probe за Eltrade. Засега True."""
-        return True
 
     # ---------------------- Ниско ниво ISL ----------------------
 
