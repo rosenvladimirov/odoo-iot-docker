@@ -4,6 +4,12 @@
 
 http:
   middlewares:
+    # === Real IP Forwarding ===
+    real-ip:
+      headers:
+        customRequestHeaders:
+          X-Real-IP: ""
+
     # === CORS Middleware ===
     cors-headers:
       headers:
@@ -53,10 +59,18 @@ http:
         scheme: https
         permanent: true
 
-    # === Chain: CORS + Security ===
+    # === IP Whitelist (за dashboard/admin) ===
+    # admin-whitelist:
+    #   ipWhiteList:
+    #     sourceRange:
+    #       - "127.0.0.1/32"
+    #       - "192.168.0.0/16"
+
+    # === Chain: Real IP + CORS + Security ===
     iot-chain:
       chain:
         middlewares:
+          - real-ip
           - cors-headers
           - security-headers
           - compression

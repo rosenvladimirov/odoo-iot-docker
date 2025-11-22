@@ -1,4 +1,3 @@
-
 ---
 # ============================================
 # ODOO IOT BOX WITH STEP-CA & TRAEFIK
@@ -183,16 +182,27 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=iot-network"
+
+      # HTTP -> HTTPS redirect
       - "traefik.http.routers.iot-http.rule=Host(`${IOT_DOMAIN:-iot-box.local}`)"
       - "traefik.http.routers.iot-http.entrypoints=web"
       - "traefik.http.routers.iot-http.middlewares=https-redirect@file"
+
+      # HTTPS router
       - "traefik.http.routers.iot-https.rule=Host(`${IOT_DOMAIN:-iot-box.local}`)"
       - "traefik.http.routers.iot-https.entrypoints=websecure"
       - "traefik.http.routers.iot-https.tls=true"
       - "traefik.http.routers.iot-https.middlewares=iot-chain@file"
+
+      # Service configuration
       - "traefik.http.services.iot-service.loadbalancer.server.port=8069"
+      - "traefik.http.services.iot-service.loadbalancer.server.scheme=http"
+      - "traefik.http.services.iot-service.loadbalancer.passhostheader=true"
+
+      # Health check
       - "traefik.http.services.iot-service.loadbalancer.healthcheck.path=/hw_proxy/hello"
       - "traefik.http.services.iot-service.loadbalancer.healthcheck.interval=30s"
+      - "traefik.http.services.iot-service.loadbalancer.healthcheck.timeout=10s"
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8069/hw_proxy/hello"]

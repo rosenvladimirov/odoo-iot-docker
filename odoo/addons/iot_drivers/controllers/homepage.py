@@ -440,6 +440,24 @@ class IotBoxOwlHomePage(http.Controller):
             'message': f'Fiscal printer set to: {pid}' if pid else 'Fiscal printer cleared',
         }
 
+    @route('/iot_drivers/printers_list', type='json', auth='none', cors='*', csrf=False)
+    def printers_list(self):
+        """Връща списък с всички налични принтери."""
+        printers = []
+        for identifier, device in iot_devices.items():
+            if device.device_type == 'printer':
+                printers.append({
+                    'identifier': identifier,
+                    'name': getattr(device, 'device_name', identifier),
+                    'device_make_and_model': getattr(device, 'device_name', ''),
+                    'device_class': getattr(device, 'device_connection', ''),
+                    'device_subtype': getattr(device, 'device_subtype', ''),
+                    'ip': getattr(device, 'ip', None),
+                    'connected': getattr(device, 'state', '') != 'disconnected',
+                })
+
+        return {'printers': printers}
+
     # ---------------------------------------------------------- #
     # GET methods                                                #
     # -> Always use json.dumps() to return a JSON response       #

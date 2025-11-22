@@ -7,6 +7,7 @@ import { RemoteDebugDialog } from "./dialog/RemoteDebugDialog.js";
 import { TimeDialog } from "./dialog/TimeDialog.js";
 import { CertificateDialog } from "./dialog/CertificateDialog.js";
 import { NetFpPrinterDialog } from "./dialog/NetFpPrinterDialog.js";
+import { PrinterListDialog } from "./dialog/PrinterListDialog.js";
 
 const { Component, xml } = owl;
 
@@ -19,6 +20,7 @@ export class FooterButtons extends Component {
         TimeDialog,
         CertificateDialog,
         NetFpPrinterDialog,
+        PrinterListDialog,
     };
 
     setup() {
@@ -26,20 +28,18 @@ export class FooterButtons extends Component {
     }
 
     static template = xml`
-    <div class="w-100 d-flex flex-wrap align-items-center gap-2 justify-content-center" t-translation="off">
-        <a t-if="store.isLinux and !store.base.is_access_point_up" class="btn btn-primary btn-sm" href="/status" target="_blank">
-            Status Display
-        </a>
-        <a t-if="store.isLinux and !store.base.is_access_point_up" class="btn btn-primary btn-sm" t-att-href="'http://' + this.store.base.ip + ':631'" target="_blank">
-            Printer Server
-        </a>
-        <RemoteDebugDialog t-if="this.store.advanced and this.store.isLinux" />
-        <CredentialDialog t-if="this.store.advanced" />
-        <HandlerDialog t-if="this.store.advanced" />
-        <CertificateDialog t-if="this.store.advanced and this.store.isLinux" />
-        <NetFpPrinterDialog t-if="this.store.advanced and this.store.isLinux" />
-        <a t-if="this.store.advanced" class="btn btn-primary btn-sm" href="/logs" target="_blank">View Logs</a>
-        <TimeDialog/>
-    </div>
-  `;
+        <div class="w-100 d-flex flex-wrap align-items-center gap-2 justify-content-center" t-translation="off">
+            <a t-if="store.isLinux and !store.base.is_access_point_up" class="btn btn-primary btn-sm" href="/status" target="_blank">
+                Status Display
+            </a>
+            <PrinterListDialog t-if="store.isLinux and !store.base.is_access_point_up" />
+            <RemoteDebugDialog t-if="this.store.advanced and this.store.isLinux" />
+            <CredentialDialog t-if="this.store.advanced" />
+            <HandlerDialog t-if="this.store.advanced" />
+            <CertificateDialog t-if="this.store.advanced and this.store.isLinux" />
+            <NetFpPrinterDialog t-if="this.store.advanced and this.store.isLinux" />
+            <a t-if="this.store.advanced" class="btn btn-primary btn-sm" href="/logs" target="_blank">View Logs</a>
+            <TimeDialog/>
+        </div>
+      `;
 }

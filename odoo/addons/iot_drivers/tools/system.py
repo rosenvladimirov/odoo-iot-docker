@@ -223,10 +223,76 @@ def generate_password():
 
 
 def get_ip():
+    """
+    Получава IP адрес на IoT устройството.
+
+    В Docker/прокси среда:
+    - Проверява X-Forwarded-For и X-Real-IP headers (ако е зад reverse proxy)
+    - Опитва се да извлече public IP от http.request (ако е налично)
+    - Fallback към външно API за определяне на публичен IP
+    - Накрая – socket метод (локален IP)
+
+    Returns:
+        str: IP адрес или None
+    """
+    # 1) Проверка за HTTP request context (зад reverse proxy)
+    if IS_DOCKER:
+        try:
+            from odoo import http
+            if http.request and hasattr(http.request, 'httprequest'):
+                req = http.request.httprequest
+
+                # X-Forwarded-For header (стандарт за proxy chains)
+                forwarded_for = req.headers.get('X-Forwarded-For')
+                if forwarded_for:
+                    # Взимаме първия IP (клиентския)
+                    client_ip = forwarded_for.split(',')[0].strip()
+                    if client_ip and not client_ip.startswith(('10.', '172.', '192.168.', '127.')):
+                        _logger.debug(f"Using IP from X-Forwarded-For: {client_ip}")
+                        return client_ip
+
+                # X-Real-IP header (nginx стандарт)
+                real_ip = req.headers.get('X-Real-IP')
+                if real_ip and not real_ip.startswith(('10.', '172.', '192.168.', '127.')):
+                    _logger.debug(f"Using IP from X-Real-IP: {real_ip}")
+                    return real_ip
+
+                # Proxy-Server header
+                via = req.headers.get('Via')
+                if via:
+                    _logger.debug(f"Request is behind proxy (Via: {via})")
+        except (ImportError, RuntimeError, AttributeError):
+            # Извън HTTP request context
+            pass
+
+    # 2) В Docker без активен HTTP request – опит за публичен IP през API
+    if IS_DOCKER:
+        try:
+            import requests
+            # Използваме бърз API за определяне на публичен IP
+            response = requests.get('https://api.ipify.org?format=text', timeout=2)
+            if response.status_code == 200:
+                public_ip = response.text.strip()
+                if public_ip:
+                    _logger.debug(f"Using public IP from ipify API: {public_ip}")
+                    return public_ip
+        except Exception as e:
+            _logger.debug(f"Failed to get public IP from API: {e}")
+
+    # 3) Fallback – локален IP чрез socket (оригиналния метод)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(('8.8.8.8', 1))  # Google DNS
-        return s.getsockname()[0]
+        local_ip = s.getsockname()[0]
+
+        # В Docker това е контейнерен IP – логваме предупреждение
+        if IS_DOCKER and local_ip.startswith('172.'):
+            _logger.warning(
+                f"Using Docker internal IP: {local_ip}. "
+                f"Consider configuring reverse proxy with X-Forwarded-For header."
+            )
+
+        return local_ip
     except OSError as e:
         _logger.warning("Could not get local IP address: %s", e)
         return None
