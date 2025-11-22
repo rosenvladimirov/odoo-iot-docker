@@ -363,6 +363,84 @@ class IotBoxOwlHomePage(http.Controller):
         }
 
     # ---------------------------------------------------------- #
+    # FISCAL PRINTERS (паралелна логика за друга имплементация)  #
+    # ---------------------------------------------------------- #
+    @route.iot_route('/iot_drivers/fiscal_printers', type='http', cors='*')
+    def get_fiscal_printers(self):
+        """
+        GET: списък с фискални принтери + текущ default принтер.
+
+        Формат:
+        {
+          "default_printer": "<identifier>",
+          "fiscal_printers": [
+             {
+               "identifier": "<device_id>",
+               "manufacturer": "...",
+               "model": "...",
+               "serial_number": "...",
+               "port": "...",
+               "baudrate": 115200
+             },
+             ...
+          ]
+        }
+        """
+        default_printer = system.get_conf('fiscal_printer_id') or ""
+
+        fiscal_printers = []
+        for dev in iot_devices.values():
+            # Филтрираме само fiscal_data_module или принтери с фискална функционалност
+            if getattr(dev, "device_type", "") not in ("fiscal_data_module", "printer"):
+                continue
+
+            info = getattr(dev, "info", None)
+            if not info:
+                continue
+
+            # Опит за извличане на данни от info
+            serial = getattr(info, "serial_number", None) or getattr(info, "SerialNumber", None)
+            manufacturer = getattr(info, "manufacturer", None) or getattr(info, "Manufacturer", None)
+            model = getattr(info, "model", None) or getattr(info, "Model", None)
+
+            # URI/port информация
+            uri = getattr(info, "uri", None) or getattr(dev, "uri", "")
+            port = uri.split("://")[-1] if uri else getattr(dev, "device_connection", "")
+            baudrate = getattr(info, "baudrate", getattr(info, "Baudrate", 115200))
+
+            identifier = serial or dev.device_identifier or ""
+
+            fiscal_printers.append({
+                "identifier": identifier.lower(),
+                "manufacturer": manufacturer or "Unknown",
+                "model": model or "Unknown",
+                "serial_number": serial or "",
+                "port": port,
+                "baudrate": baudrate,
+            })
+
+        return json.dumps({
+            "default_printer": default_printer,
+            "fiscal_printers": fiscal_printers,
+        })
+
+    @route.iot_route('/iot_drivers/fiscal_printer/set_default', type='jsonrpc', methods=['POST'], cors='*')
+    def set_default_fiscal_printer(self, printer_id=None):
+        """
+        POST (jsonrpc): задава default фискален принтер.
+
+        params: { "printer_id": "<identifier>" }
+        """
+        pid = (printer_id or "").strip()
+        system.update_conf({'fiscal_printer_id': pid})
+
+        return {
+            'status': 'success',
+            'printer_id': pid,
+            'message': f'Fiscal printer set to: {pid}' if pid else 'Fiscal printer cleared',
+        }
+
+    # ---------------------------------------------------------- #
     # GET methods                                                #
     # -> Always use json.dumps() to return a JSON response       #
     # ---------------------------------------------------------- #

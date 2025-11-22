@@ -1,11 +1,14 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
+import logging
 from usb import core
 
 from odoo.addons.iot_drivers.interface import Interface
 from odoo.addons.iot_drivers.tools.fiscal_detection_registry import (
     FiscalDetectionRegistry
 )
+
+_logger = logging.getLogger(__name__)
 
 
 class USBInterface(Interface):
@@ -31,6 +34,41 @@ class USBInterface(Interface):
         except ValueError:
             return True
 
+    @staticmethod
+    def _get_usb_serial_port(dev):
+        """
+        Опитва се да намери серийния порт, свързан с USB устройството.
+
+        Returns:
+            str: Пътят до серийния порт (/dev/ttyUSB0, /dev/ttyACM0, и т.н.) или None
+        """
+        import glob
+        import os
+
+        try:
+            # Търси устройството в /sys/bus/usb/devices/
+            usb_id = f"{dev.bus}-{dev.address}"
+            sys_path = f"/sys/bus/usb/devices/{usb_id}"
+
+            if not os.path.exists(sys_path):
+                return None
+
+            # Търси tty интерфейси
+            tty_pattern = f"{sys_path}/**/tty*"
+            tty_devices = glob.glob(tty_pattern, recursive=True)
+
+            for tty_path in tty_devices:
+                tty_name = os.path.basename(tty_path)
+                if tty_name.startswith(('ttyUSB', 'ttyACM')):
+                    port = f"/dev/{tty_name}"
+                    if os.path.exists(port):
+                        return port
+
+        except Exception as e:  # noqa: BLE001
+            _logger.debug(f"Error finding serial port for USB device: {e}")
+
+        return None
+
     def get_devices(self):
         """
         USB devices are identified by a combination of their `idVendor` and
@@ -50,12 +88,41 @@ class USBInterface(Interface):
                 cpt += 1
 
             # Опит за детекция на фискален принтер през USB-to-Serial
-            # (ако устройството има serial interface)
-            device_info = {'identifier': identifier}
+            serial_port = self._get_usb_serial_port(dev)
 
-            # TODO: Ако USB устройството е USB-to-Serial adapter,
-            # може да се опита детекция чрез FiscalDetectionRegistry
+            if serial_port:
+                _logger.info(f"Found USB-to-Serial adapter: {identifier} -> {serial_port}")
 
+                # Опитваме детекция на фискален принтер
+                detection_result = FiscalDetectionRegistry.detect_device(
+                    port=serial_port,
+                    preferred_baudrate=115200,
+                    timeout=2.0,
+                )
+
+                if detection_result:
+                    driver_class, device_info = detection_result
+
+                    _logger.info(
+                        f"✅ Detected fiscal printer on USB: "
+                        f"{device_info.get('manufacturer')} "
+                        f"{device_info.get('model')} "
+                        f"at {serial_port}"
+                    )
+
+                    # Използваме serial порта като identifier за консистентност
+                    device_info['identifier'] = serial_port
+                    device_info['usb_identifier'] = identifier
+                    device_info['driver_class'] = driver_class
+                    device_info['connection_type'] = 'serial'  # Fiscal принтерите са serial
+                    device_info['usb_vendor_id'] = dev.idVendor
+                    device_info['usb_product_id'] = dev.idProduct
+
+                    # Добавяме като serial устройство (с fiscal info)
+                    usb_devices[serial_port] = device_info
+                    continue
+
+            # Стандартно USB устройство (не фискален принтер)
             usb_devices[identifier] = dev
 
         return usb_devices
