@@ -3,6 +3,9 @@
 from usb import core
 
 from odoo.addons.iot_drivers.interface import Interface
+from odoo.addons.iot_drivers.tools.fiscal_detection_registry import (
+    FiscalDetectionRegistry
+)
 
 
 class USBInterface(Interface):
@@ -39,10 +42,20 @@ class USBInterface(Interface):
         usb_devices = {}
         devs = core.find(find_all=True, custom_match=self.usb_matcher)
         cpt = 2
+
         for dev in devs:
             identifier = "usb_%04x:%04x" % (dev.idVendor, dev.idProduct)
             if identifier in usb_devices:
                 identifier += '_%s' % cpt
                 cpt += 1
+
+            # Опит за детекция на фискален принтер през USB-to-Serial
+            # (ако устройството има serial interface)
+            device_info = {'identifier': identifier}
+
+            # TODO: Ако USB устройството е USB-to-Serial adapter,
+            # може да се опита детекция чрез FiscalDetectionRegistry
+
             usb_devices[identifier] = dev
+
         return usb_devices

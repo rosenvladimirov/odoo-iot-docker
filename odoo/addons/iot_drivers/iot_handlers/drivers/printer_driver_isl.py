@@ -1,6 +1,8 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 import logging
+import time
+
 import serial
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple, List, Any
@@ -81,6 +83,100 @@ class IslIcpFiscalPrinterDriver(IslFiscalPrinterBase):
                 "Operator.Password": "",
             }
         )
+
+    # ====================== DETECTION METHOD ======================
+
+    @classmethod
+    def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
+        """
+        Статичен метод за детекция на ISL ICP устройство.
+
+        ISL ICP използва ICP протокол със serial prefix "IS".
+        """
+        try:
+            CMD_GET_DEVICE_INFO = 0x90
+
+            # Изпращаме device info команда
+            message = cls._build_isl_detection_message(CMD_GET_DEVICE_INFO, b'')
+
+            connection.write(message)
+            time.sleep(0.2)
+
+            response = connection.read(256)
+
+            if not response or len(response) < 10:
+                return None
+
+            # Проверка за ISL структура
+            if response[0] != 0x02:
+                return None
+
+            # Проверка за "IS" префикс
+            data_str = response.decode('cp1251', errors='ignore')
+
+            if 'IS' not in data_str[:20]:
+                return None
+
+            # Парсване на device info
+            device_info = cls._parse_isl_device_info(response)
+            if device_info:
+                return device_info
+
+            # Минимална информация
+            return {
+                'manufacturer': 'ISL',
+                'model': 'ISL ICP',
+                'serial_number': 'IS000000',
+                'protocol_name': 'isl.icp',
+            }
+
+        except Exception as e:
+            _logger.debug(f"ISL ICP detection failed: {e}")
+            return None
+
+    @staticmethod
+    def _build_isl_detection_message(cmd: int, data: bytes) -> bytes:
+        """Сглобява ISL съобщение за детекция."""
+        STX = 0x02
+        ETX = 0x0A
+
+        cmd_byte = bytes([cmd])
+        message = bytes([STX]) + cmd_byte + data + bytes([ETX])
+
+        return message
+
+    @staticmethod
+    def _parse_isl_device_info(response: bytes) -> Optional[Dict[str, Any]]:
+        """Парсва ISL ICP device info."""
+        try:
+            data_str = response.decode('cp1251', errors='ignore')
+            parts = data_str.split('\t')
+
+            if len(parts) < 2:
+                return None
+
+            fixed_part = parts[0] if len(parts) > 0 else ""
+            model_part = parts[1] if len(parts) > 1 else ""
+
+            serial = fixed_part[0:8].strip() if len(fixed_part) >= 8 else "IS000000"
+            fm_serial = fixed_part[8:16].strip() if len(fixed_part) >= 16 else ""
+
+            model_fields = model_part.split(' ')
+            model = model_fields[0] if len(model_fields) > 0 else "ISL-Unknown"
+            firmware = model_fields[1] if len(model_fields) > 1 else "1.0"
+
+            return {
+                'manufacturer': 'ISL',
+                'model': model,
+                'firmware_version': firmware,
+                'serial_number': serial,
+                'fiscal_memory_serial': fm_serial,
+                'protocol_name': 'isl.icp',
+            }
+
+        except Exception as e:
+            _logger.debug(f"Failed to parse ISL device info: {e}")
+            return None
 
     # ---------------------- Поддръжка / избор на устройство ----------------------
 

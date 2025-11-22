@@ -136,6 +136,107 @@ class TremolFiscalPrinterDriver(SerialDriver):
         self.device_type = 'fiscal_printer'
         self.message_counter = 0x20  # NBL започва от 0x20
 
+    # ====================== DETECTION METHOD ======================
+    @classmethod
+    def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
+        """
+        Статичен метод за детекция на Tremol устройство.
+
+        Tremol отговаря с '@' (0x40) на ENQ (0x09).
+        """
+        try:
+            ENQ = b'\x09'
+            ACK = b'\x40'
+
+            # Изпращаме ENQ за проверка
+            connection.write(ENQ)
+            time.sleep(0.1)
+
+            response = connection.read(1)
+
+            if response != ACK:
+                return None
+
+            # Успешна детекция – вземаме device info
+            # Изпращаме status команда (0x21) за информация
+            info_msg = cls._build_tremol_message(0x21, "")
+            connection.write(info_msg)
+            time.sleep(0.2)
+
+            info_response = connection.read(512)
+
+            if info_response:
+                device_info = cls._parse_tremol_device_info(info_response)
+                if device_info:
+                    return device_info
+
+            # Минимална информация
+            return {
+                'manufacturer': 'Tremol',
+                'model': 'Unknown Tremol',
+                'serial_number': 'TREMOL-DETECTED',
+                'protocol_name': 'tremol.master_slave',
+            }
+
+        except Exception as e:
+            _logger.debug(f"Tremol detection failed: {e}")
+            return None
+
+    @staticmethod
+    def _build_tremol_message(cmd: int, data: str) -> bytes:
+        """Сглобява Tremol master/slave съобщение."""
+        STX = 0x02
+        ETX = 0x0A
+
+        data_bytes = data.encode('cp1251') if data else b''
+        length = 3 + len(data_bytes) + 0x20
+        nbl = 0x20
+
+        core = bytes([length, nbl, cmd]) + data_bytes
+
+        # XOR checksum
+        checksum = 0
+        for b in core:
+            checksum ^= b
+
+        cs = bytes([
+            ((checksum >> 4) & 0x0F) + 0x30,
+            (checksum & 0x0F) + 0x30,
+        ])
+
+        return bytes([STX]) + core + cs + bytes([ETX])
+
+    @staticmethod
+    def _parse_tremol_device_info(response: bytes) -> Optional[Dict[str, Any]]:
+        """Парсва Tremol device info."""
+        try:
+            # Намери DATA полето
+            if len(response) < 10 or response[0] != 0x02:
+                return None
+
+            length = response[1] - 0x20
+            data_bytes = response[4:4 + length - 3]
+            data_str = data_bytes.decode('cp1251', errors='ignore')
+
+            # Tremol формат: Model,Version,Date,Serial,FMSerial,...
+            fields = data_str.split(',')
+
+            if len(fields) >= 4:
+                return {
+                    'manufacturer': 'Tremol',
+                    'model': fields[0] if len(fields) > 0 else 'Unknown',
+                    'firmware_version': fields[1] if len(fields) > 1 else '1.0',
+                    'serial_number': fields[3] if len(fields) > 3 else 'TR000000',
+                    'fiscal_memory_serial': fields[4] if len(fields) > 4 else '',
+                    'protocol_name': 'tremol.master_slave',
+                }
+
+            return None
+
+        except Exception as e:
+            _logger.debug(f"Failed to parse Tremol device info: {e}")
+            return None
+
     # ---------------------- Поддръжка и избор на устройство ----------------------
 
     @classmethod

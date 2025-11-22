@@ -1,6 +1,8 @@
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 import logging
+import time
+
 import serial
 from dataclasses import dataclass
 from decimal import Decimal
@@ -112,6 +114,92 @@ class IncotexIslFiscalPrinterDriver(IslFiscalPrinterBase):
             "pos_z_report": self._action_pos_z_report,
             "pos_print_duplicate": self._action_pos_print_duplicate,
         })
+
+    # ====================== DETECTION METHOD ======================
+
+    @classmethod
+    def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
+        """
+        Статичен метод за детекция на Incotex устройство.
+
+        Incotex използва ISL протокол със serial prefix "IN".
+        """
+        try:
+            CMD_GET_DEVICE_CONSTANTS = 0x80
+
+            # Изпращаме device constants команда
+            message = cls._build_isl_detection_message(CMD_GET_DEVICE_CONSTANTS, b'')
+
+            connection.write(message)
+            time.sleep(0.2)
+
+            response = connection.read(256)
+
+            if not response or len(response) < 10:
+                return None
+
+            # Проверка за ISL структура
+            if response[0] != 0x02:
+                return None
+
+            # Проверка за "IN" префикс
+            data_str = response.decode('cp1251', errors='ignore')
+
+            if 'IN' not in data_str[:20]:
+                return None
+
+            # Парсване на device info
+            device_info = cls._parse_incotex_device_info(response)
+            if device_info:
+                return device_info
+
+            # Минимална информация
+            return {
+                'manufacturer': 'Incotex',
+                'model': 'Unknown Incotex',
+                'serial_number': 'IN000000',
+                'protocol_name': 'incotex.isl',
+            }
+
+        except Exception as e:
+            _logger.debug(f"Incotex detection failed: {e}")
+            return None
+
+    @staticmethod
+    def _build_isl_detection_message(cmd: int, data: bytes) -> bytes:
+        """Сглобява ISL съобщение за детекция."""
+        STX = 0x02
+        ETX = 0x0A
+
+        cmd_byte = bytes([cmd])
+        message = bytes([STX]) + cmd_byte + data + bytes([ETX])
+
+        return message
+
+    @staticmethod
+    def _parse_incotex_device_info(response: bytes) -> Optional[Dict[str, Any]]:
+        """Парсва Incotex device info."""
+        try:
+            data_str = response.decode('cp1251', errors='ignore')
+
+            # Incotex формат: "Version,?,?,?,Serial,FMSerial,TaxID"
+            fields = data_str.split(',')
+
+            if len(fields) >= 6:
+                return {
+                    'manufacturer': 'Incotex',
+                    'model': 'Incotex EFD',
+                    'firmware_version': fields[0] if len(fields) > 0 else '1.0',
+                    'serial_number': fields[4] if len(fields) > 4 else 'IN000000',
+                    'fiscal_memory_serial': fields[5] if len(fields) > 5 else '',
+                    'protocol_name': 'incotex.isl',
+                }
+
+            return None
+
+        except Exception as e:
+            _logger.debug(f"Failed to parse Incotex device info: {e}")
+            return None
 
     def _action_pos_print_receipt(self, data: dict):
         pos_receipt = data.get("data") or data.get("receipt") or {}

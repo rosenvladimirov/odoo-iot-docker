@@ -124,6 +124,138 @@ class DatecsIslFiscalPrinterDriver(IslFiscalPrinterBase):
             }
         )
 
+    # ====================== DETECTION METHOD (вграден в драйвера) ======================
+
+    @classmethod
+    def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
+        """
+        Статичен метод за детекция на Datecs устройство.
+
+        Викан от FiscalDetectionRegistry.
+
+        Args:
+            connection: Отворена serial.Serial връзка
+            baudrate: Baudrate за връзката
+
+        Returns:
+            Dict с device info ако е открит, иначе None
+        """
+        try:
+            # Изпращаме STATUS команда за бърза проверка
+            seq = 0x20
+            message = cls._build_detection_message(cls.CMD_STATUS, b'', seq)
+
+            connection.write(message)
+            time.sleep(0.1)
+
+            response = connection.read(100)
+
+            if not response:
+                return None
+
+            # Проверка за валиден Datecs отговор
+            if response[0:1] != bytes([cls.MARKER_PREAMBLE]):
+                return None
+
+            if not cls._validate_checksum(response):
+                return None
+
+            # Успешна детекция – вземаме device info
+            info_message = cls._build_detection_message(cls.CMD_DEVICE_INFO, b'', seq + 1)
+            connection.write(info_message)
+            time.sleep(0.2)
+
+            info_response = connection.read(512)
+
+            if info_response:
+                device_info = cls._parse_device_info(info_response)
+                if device_info:
+                    return device_info
+
+            # Минимална информация ако парсването се провали
+            return {
+                'manufacturer': 'Datecs',
+                'model': 'Unknown Datecs',
+                'serial_number': 'DETECTED',
+                'protocol_name': 'datecs.isl',
+            }
+
+        except Exception as e:
+            _logger.debug(f"Datecs detection failed: {e}")
+            return None
+
+    @staticmethod
+    def _build_detection_message(cmd: int, data: bytes, seq: int) -> bytes:
+        """Сглобява ISL съобщение за детекция."""
+        PRE = 0x01
+        PST = 0x05
+        ETX = 0x03
+
+        length = 3 + len(data) + 0x20
+        core = bytes([length, seq, cmd]) + data + bytes([PST])
+
+        # Checksum (sum)
+        checksum = sum(core) & 0xFFFF
+        cs_bytes = bytes([
+            ((checksum >> 12) & 0x0F) + 0x30,
+            ((checksum >> 8) & 0x0F) + 0x30,
+            ((checksum >> 4) & 0x0F) + 0x30,
+            (checksum & 0x0F) + 0x30,
+        ])
+
+        return bytes([PRE]) + core + cs_bytes + bytes([ETX])
+
+    @staticmethod
+    def _validate_checksum(response: bytes) -> bool:
+        """Валидира Datecs checksum."""
+        if len(response) < 10:
+            return False
+
+        if response[-1:] != bytes([0x03]):  # ETX
+            return False
+
+        try:
+            bcc_hex = response[-5:-1]
+            bcc_received = int(bcc_hex, 16)
+
+            message_part = response[1:-5]
+            bcc_calculated = sum(message_part) & 0xFFFF
+
+            return bcc_received == bcc_calculated
+        except:
+            return False
+
+    @staticmethod
+    def _parse_device_info(response: bytes) -> Optional[Dict[str, Any]]:
+        """Парсва device info от Datecs отговор."""
+        try:
+            # Намери PST позицията
+            pst_pos = response.find(bytes([0x05]))
+            if pst_pos == -1:
+                return None
+
+            # Данните са между позиция 10 и PST
+            data = response[10:pst_pos]
+            data_str = data.decode('cp1251', errors='ignore')
+
+            fields = data_str.split('\t')
+
+            if len(fields) >= 4:
+                return {
+                    'manufacturer': 'Datecs',
+                    'model': fields[0] if len(fields) > 0 else 'Unknown',
+                    'firmware_version': fields[1] if len(fields) > 1 else '1.0',
+                    'serial_number': fields[3] if len(fields) > 3 else 'DT000000',
+                    'fiscal_memory_serial': fields[4] if len(fields) > 4 else '',
+                    'protocol_name': 'datecs.isl',
+                }
+
+            return None
+
+        except Exception as e:
+            _logger.debug(f"Failed to parse Datecs device info: {e}")
+            return None
+
     # ====================== ISL фрейминг (ниско ниво) ======================
 
     def _uint16_to_4bytes(self, word: int) -> bytes:
