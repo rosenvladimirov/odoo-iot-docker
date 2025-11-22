@@ -440,7 +440,7 @@ class IotBoxOwlHomePage(http.Controller):
             'message': f'Fiscal printer set to: {pid}' if pid else 'Fiscal printer cleared',
         }
 
-    @route('/iot_drivers/printers_list', type='json', auth='none', cors='*', csrf=False)
+    @route.iot_route('/iot_drivers/printers_list', type='jsonrpc', auth='none', cors='*', csrf=False)
     def printers_list(self):
         """Връща списък с всички налични принтери."""
         printers = []
