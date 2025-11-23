@@ -4,9 +4,6 @@ import logging
 from usb import core
 
 from odoo.addons.iot_drivers.interface import Interface
-from odoo.addons.iot_drivers.tools.fiscal_detection_registry import (
-    FiscalDetectionRegistry
-)
 
 _logger = logging.getLogger(__name__)
 
@@ -87,42 +84,21 @@ class USBInterface(Interface):
                 identifier += '_%s' % cpt
                 cpt += 1
 
-            # Опит за детекция на фискален принтер през USB-to-Serial
+            # Опит за намиране на serial port за USB-to-Serial адаптери
             serial_port = self._get_usb_serial_port(dev)
 
             if serial_port:
                 _logger.info(f"Found USB-to-Serial adapter: {identifier} -> {serial_port}")
 
-                # Опитваме детекция на фискален принтер
-                detection_result = FiscalDetectionRegistry.detect_device(
-                    port=serial_port,
-                    preferred_baudrate=115200,
-                    timeout=2.0,
-                )
-
-                if detection_result:
-                    driver_class, device_info = detection_result
-
-                    _logger.info(
-                        f"✅ Detected fiscal printer on USB: "
-                        f"{device_info.get('manufacturer')} "
-                        f"{device_info.get('model')} "
-                        f"at {serial_port}"
-                    )
-
-                    # Използваме serial порта като identifier за консистентност
-                    device_info['identifier'] = serial_port
-                    device_info['usb_identifier'] = identifier
-                    device_info['driver_class'] = driver_class
-                    device_info['connection_type'] = 'serial'  # Fiscal принтерите са serial
-                    device_info['usb_vendor_id'] = dev.idVendor
-                    device_info['usb_product_id'] = dev.idProduct
-
-                    # Добавяме като serial устройство (с fiscal info)
-                    usb_devices[serial_port] = device_info
-                    continue
-
-            # Стандартно USB устройство (не фискален принтер)
-            usb_devices[identifier] = dev
+                # Добавяме като serial устройство - Odoo ще извика supported() автоматично
+                usb_devices[serial_port] = {
+                    'identifier': serial_port,
+                    'usb_identifier': identifier,
+                    'usb_vendor_id': dev.idVendor,
+                    'usb_product_id': dev.idProduct,
+                }
+            else:
+                # Стандартно USB устройство (не serial)
+                usb_devices[identifier] = dev
 
         return usb_devices

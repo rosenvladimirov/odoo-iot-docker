@@ -1,3 +1,4 @@
+
 # Part of Odoo. See LICENSE file for full copyright and licensing details.
 
 import logging
@@ -159,14 +160,14 @@ class TremolFiscalPrinterDriver(SerialDriver):
 
             # Успешна детекция – вземаме device info
             # Изпращаме status команда (0x21) за информация
-            info_msg = cls._build_tremol_message(0x21, "")
+            info_msg = cls._build_tremol_message_static(0x21, "")
             connection.write(info_msg)
             time.sleep(0.2)
 
             info_response = connection.read(512)
 
             if info_response:
-                device_info = cls._parse_tremol_device_info(info_response)
+                device_info = cls._parse_tremol_device_info_static(info_response)
                 if device_info:
                     return device_info
 
@@ -183,8 +184,8 @@ class TremolFiscalPrinterDriver(SerialDriver):
             return None
 
     @staticmethod
-    def _build_tremol_message(cmd: int, data: str) -> bytes:
-        """Сглобява Tremol master/slave съобщение."""
+    def _build_tremol_message_static(cmd: int, data: str) -> bytes:
+        """Сглобява Tremol master/slave съобщение (статична версия)."""
         STX = 0x02
         ETX = 0x0A
 
@@ -207,8 +208,8 @@ class TremolFiscalPrinterDriver(SerialDriver):
         return bytes([STX]) + core + cs + bytes([ETX])
 
     @staticmethod
-    def _parse_tremol_device_info(response: bytes) -> Optional[Dict[str, Any]]:
-        """Парсва Tremol device info."""
+    def _parse_tremol_device_info_static(response: bytes) -> Optional[Dict[str, Any]]:
+        """Парсва Tremol device info (статична версия)."""
         try:
             # Намери DATA полето
             if len(response) < 10 or response[0] != 0x02:
@@ -218,16 +219,16 @@ class TremolFiscalPrinterDriver(SerialDriver):
             data_bytes = response[4:4 + length - 3]
             data_str = data_bytes.decode('cp1251', errors='ignore')
 
-            # Tremol формат: Model,Version,Date,Serial,FMSerial,...
-            fields = data_str.split(',')
+            # Tremol формат: Model;Version;Date;Serial;FMSerial;...
+            fields = data_str.split(';')
 
             if len(fields) >= 4:
                 return {
                     'manufacturer': 'Tremol',
-                    'model': fields[0] if len(fields) > 0 else 'Unknown',
-                    'firmware_version': fields[1] if len(fields) > 1 else '1.0',
-                    'serial_number': fields[3] if len(fields) > 3 else 'TR000000',
-                    'fiscal_memory_serial': fields[4] if len(fields) > 4 else '',
+                    'model': fields[3] if len(fields) > 3 else 'Unknown',
+                    'firmware_version': fields[4] if len(fields) > 4 else '1.0',
+                    'serial_number': fields[0] if len(fields) > 0 else 'TR000000',
+                    'fiscal_memory_serial': fields[1] if len(fields) > 1 else '',
                     'protocol_name': 'tremol.master_slave',
                 }
 
@@ -241,8 +242,96 @@ class TremolFiscalPrinterDriver(SerialDriver):
 
     @classmethod
     def supported(cls, device):
-        """По желание тук може да се направи реално „probe“. Засега връщаме True."""
-        return True
+        """
+        Проверява дали този драйвер поддържа устройството.
+        """
+        _logger.info("=" * 80)
+        _logger.info(f"🔍 SUPPORTED() DEBUG: {cls.__name__}")
+        _logger.info("=" * 80)
+
+        # Извлечи port path от device
+        _logger.info(f"📦 Device input type: {type(device)}")
+        _logger.info(f"📦 Device input value: {device}")
+
+        if isinstance(device, str):
+            port = device
+            _logger.info(f"✅ Device is string: {port}")
+        elif isinstance(device, dict):
+            port = device.get('identifier') or device.get('device')
+            _logger.info(f"✅ Device is dict, extracted port: {port}")
+        else:
+            _logger.warning(f"❌ {cls.__name__}: Unknown device type: {type(device)}")
+            return False
+
+        if not port or not isinstance(port, str):
+            _logger.warning(f"❌ {cls.__name__}: Invalid port: {port}")
+            return False
+
+        # Провери дали е serial port
+        if not port.startswith('/dev/tty'):
+            _logger.info(f"❌ {cls.__name__}: Not a serial port: {port}")
+            return False
+
+        _logger.info(f"✅ {cls.__name__}: Valid serial port: {port}")
+
+        _logger.info(f"🔍 {cls.__name__}: Trying to detect on {port}")
+
+        try:
+            import serial
+
+            # Вземи baudrate от protocol
+            baudrate = 115200
+            if hasattr(cls, '_protocol') and hasattr(cls._protocol, 'baudrate'):
+                baudrate = cls._protocol.baudrate
+                _logger.info(f"✅ Using baudrate from protocol: {baudrate}")
+            else:
+                _logger.info(f"⚠️ Using default baudrate: {baudrate}")
+
+            _logger.info(f"🔌 {cls.__name__}: Opening {port} at {baudrate} baud")
+
+            connection = serial.Serial(
+                port=port,
+                baudrate=baudrate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=0.5,
+                write_timeout=0.5,
+            )
+
+            _logger.info(f"✅ {cls.__name__}: Serial connection opened successfully")
+
+            try:
+                connection.reset_input_buffer()
+                connection.reset_output_buffer()
+                _logger.info(f"✅ {cls.__name__}: Buffers reset")
+
+                # Викай detect_device
+                _logger.info(f"📡 {cls.__name__}: Calling detect_device()")
+                device_info = cls.detect_device(connection, baudrate)
+
+                _logger.info(f"📡 {cls.__name__}: detect_device() returned: {device_info}")
+
+                if device_info:
+                    _logger.info(f"✅ {cls.__name__} DETECTED device on {port}")
+                    _logger.info(f"   Device info: {device_info}")
+                    _logger.info("=" * 80)
+                    return True
+                else:
+                    _logger.info(f"❌ {cls.__name__}: No device detected on {port}")
+                    _logger.info("=" * 80)
+                    return False
+
+            finally:
+                connection.close()
+                _logger.info(f"🔌 {cls.__name__}: Serial connection closed")
+
+        except Exception as e:
+            _logger.error(f"⚠️ {cls.__name__}: Detection EXCEPTION on {port}")
+            _logger.error(f"   Exception type: {type(e).__name__}")
+            _logger.error(f"   Exception message: {e}", exc_info=True)
+            _logger.info("=" * 80)
+            return False
 
     @classmethod
     def get_default_device(cls):
@@ -598,6 +687,7 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
 
     _protocol = TremolIslProtocol
     device_type = "fiscal_printer"
+    priority = 21  # Малко по-нисък приоритет от нативния Tremol драйвер
 
     def __init__(self, identifier, device):
         super().__init__(identifier, device)
@@ -625,6 +715,107 @@ class TremolIslFiscalPrinterDriver(IslFiscalPrinterBase):
             "pos_z_report": self._action_pos_z_report,
             "pos_print_duplicate": self._action_pos_print_duplicate,
         })
+
+    # ====================== DETECTION METHOD ======================
+    @classmethod
+    def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
+        """
+        Статичен метод за детекция на Tremol устройство.
+
+        Tremol отговаря с '@' (0x40) на ENQ (0x09).
+        """
+        try:
+            ENQ = b'\x09'
+            ACK = b'\x40'
+
+            # Изпращаме ENQ за проверка
+            connection.write(ENQ)
+            time.sleep(0.1)
+
+            response = connection.read(1)
+
+            if response != ACK:
+                return None
+
+            # Успешна детекция – вземаме device info
+            # Изпращаме status команда (0x21) за информация
+            info_msg = cls._build_tremol_message_static(0x21, "")
+            connection.write(info_msg)
+            time.sleep(0.2)
+
+            info_response = connection.read(512)
+
+            if info_response:
+                device_info = cls._parse_tremol_device_info_static(info_response)
+                if device_info:
+                    return device_info
+
+            # Минимална информация
+            return {
+                'manufacturer': 'Tremol',
+                'model': 'Unknown Tremol ISL',
+                'serial_number': 'TREMOL-ISL-DETECTED',
+                'protocol_name': 'tremol.isl',
+            }
+
+        except Exception as e:
+            _logger.debug(f"Tremol ISL detection failed: {e}")
+            return None
+
+    @staticmethod
+    def _build_tremol_message_static(cmd: int, data: str) -> bytes:
+        """Сглобява Tremol master/slave съобщение (статична версия за ISL)."""
+        STX = 0x02
+        ETX = 0x0A
+
+        data_bytes = data.encode('cp1251') if data else b''
+        length = 3 + len(data_bytes) + 0x20
+        nbl = 0x20
+
+        core = bytes([length, nbl, cmd]) + data_bytes
+
+        # XOR checksum
+        checksum = 0
+        for b in core:
+            checksum ^= b
+
+        cs = bytes([
+            ((checksum >> 4) & 0x0F) + 0x30,
+            (checksum & 0x0F) + 0x30,
+        ])
+
+        return bytes([STX]) + core + cs + bytes([ETX])
+
+    @staticmethod
+    def _parse_tremol_device_info_static(response: bytes) -> Optional[Dict[str, Any]]:
+        """Парсва Tremol device info (статична версия за ISL)."""
+        try:
+            # Намери DATA полето
+            if len(response) < 10 or response[0] != 0x02:
+                return None
+
+            length = response[1] - 0x20
+            data_bytes = response[4:4 + length - 3]
+            data_str = data_bytes.decode('cp1251', errors='ignore')
+
+            # Tremol формат: Model;Version;Date;Serial;FMSerial;...
+            fields = data_str.split(';')
+
+            if len(fields) >= 4:
+                return {
+                    'manufacturer': 'Tremol',
+                    'model': fields[3] if len(fields) > 3 else 'Unknown',
+                    'firmware_version': fields[4] if len(fields) > 4 else '1.0',
+                    'serial_number': fields[0] if len(fields) > 0 else 'TR000000',
+                    'fiscal_memory_serial': fields[1] if len(fields) > 1 else '',
+                    'protocol_name': 'tremol.isl',
+                }
+
+            return None
+
+        except Exception as e:
+            _logger.debug(f"Failed to parse Tremol ISL device info: {e}")
+            return None
 
     # ---------------------- Tremol master/slave фрейминг за ISL ----------------------
 

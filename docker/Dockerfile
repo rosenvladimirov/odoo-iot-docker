@@ -13,7 +13,8 @@ LABEL version="${IOT_VERSION}"
 ENV IOT_IN_DOCKER=true \
     IOT_VERSION=${IOT_VERSION} \
     PYTHONUNBUFFERED=1 \
-    LANG=C.UTF-8
+    LANG=C.UTF-8 \
+    PYTHONWARNINGS="ignore::DeprecationWarning:werkzeug.routing"
 
 # === SYSTEM PACKAGES ===
 RUN apt-get update && apt-get install -y --no-install-recommends \

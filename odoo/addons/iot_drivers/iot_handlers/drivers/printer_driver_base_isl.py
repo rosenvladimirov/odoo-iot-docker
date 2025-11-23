@@ -131,32 +131,79 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
     - Общи командни константи (BgIslFiscalPrinter.Commands.cs).
     - Общи high-level операции върху фискален бон, каса, време и др.
     - Ниско ниво `_isl_request` и парсване на статус `parse_status` са абстрактни.
-      Конкретните драйвери (Daisy, Eltrade, Incotex) наследяват и имплементират
+      Конкретните драйвери (Daisy, Eltrade, Incotex, Datecs, Tremol) наследяват и имплементират
       протокола + статус битовете.
     """
 
     device_type = "fiscal_printer"
 
-    # Команди от BgIslFiscalPrinter.Commands.cs
-    CMD_GET_STATUS = 0x4A
-    CMD_GET_DEVICE_INFO = 0x5A
-    CMD_MONEY_TRANSFER = 0x46
-    CMD_OPEN_FISCAL_RECEIPT = 0x30
-    CMD_CLOSE_FISCAL_RECEIPT = 0x38
-    CMD_ABORT_FISCAL_RECEIPT = 0x3C
-    CMD_FISCAL_RECEIPT_TOTAL = 0x35
-    CMD_FISCAL_RECEIPT_COMMENT = 0x36
-    CMD_FISCAL_RECEIPT_SALE = 0x31
-    CMD_PRINT_DAILY_REPORT = 0x45
-    CMD_GET_DATE_TIME = 0x3E
-    CMD_SET_DATE_TIME = 0x3D
-    CMD_GET_RECEIPT_STATUS = 0x4C
-    CMD_GET_LAST_DOCUMENT_NUMBER = 0x71
-    CMD_GET_TAX_ID_NUMBER = 0x63
-    CMD_PRINT_LAST_RECEIPT_DUPLICATE = 0x6D
-    CMD_SUBTOTAL = 0x33
-    CMD_READ_LAST_RECEIPT_QR_DATA = 0x74
-    CMD_TO_PINPAD = 0x37  # специфично за DatecsX, може да се игнорира в други
+    # ====================== ВСИЧКИ ISL КОМАНДИ НА ЕДНО МЯСТО ======================
+
+    # Общи команди (0x20-0x2F)
+    CMD_GET_STATUS = 0x4A  # 74 - Четене на статус
+    CMD_DIAGNOSTIC = 0x22  # 34 - Диагностика
+    CMD_CLEAR_DISPLAY = 0x24  # 36 - Изчистване на дисплей
+    CMD_DISPLAY_TEXT_LINE1 = 0x25  # 37 - Текст на ред 1
+    CMD_DISPLAY_TEXT_LINE2 = 0x26  # 38 - Текст на ред 2
+    CMD_DISPLAY_DATETIME = 0x28  # 40 - Показване на дата/час
+    CMD_CUT_PAPER = 0x29  # 41 - Рязане на хартия
+    CMD_OPEN_DRAWER = 0x2A  # 42 - Отваряне на чекмедже
+    CMD_PAPER_FEED = 0x2B  # 43 - Подаване на хартия
+
+    # Фискални команди (0x30-0x3F)
+    CMD_OPEN_FISCAL_RECEIPT = 0x30  # 48 - Отваряне на фискален бон
+    CMD_FISCAL_RECEIPT_SALE = 0x31  # 49 - Продажба
+    CMD_FISCAL_RECEIPT_COMMENT = 0x36  # 54 - Коментар
+    CMD_FISCAL_RECEIPT_TOTAL = 0x35  # 53 - Плащане/тотал
+    CMD_CLOSE_FISCAL_RECEIPT = 0x38  # 56 - Затваряне на бон
+    CMD_ABORT_FISCAL_RECEIPT = 0x3C  # 60 - Отмяна на бон
+    CMD_SUBTOTAL = 0x33  # 51 - Междинна сума
+    CMD_SET_DATE_TIME = 0x3D  # 61 - Задаване на дата/час
+    CMD_GET_DATE_TIME = 0x3E  # 62 - Четене на дата/час
+
+    # Програмиращи команди (0x40-0x4F)
+    CMD_PROGRAM_PAYMENT = 0x44  # 68 - Програмиране на вид плащане
+    CMD_PROGRAM_PARAMETERS = 0x45  # 69 - Програмиране на параметри
+    CMD_PROGRAM_DEPARTMENT = 0x47  # 71 - Програмиране на отдел
+    CMD_PROGRAM_OPERATOR = 0x4A  # 74 - Програмиране на оператор
+    CMD_PROGRAM_PLU = 0x4B  # 75 - Програмиране на артикул
+    CMD_PROGRAM_LOGO = 0x4C  # 76 - Програмиране на лого
+    CMD_MONEY_TRANSFER = 0x46  # 70 - Служебно внасяне/изплащане
+
+    # Команди за четене (0x50-0x6F)
+    CMD_GET_DEVICE_INFO = 0x5A  # 90 - Информация за устройството
+    CMD_READ_SERIAL_NUMBERS = 0x60  # 96 - Серийни номера
+    CMD_READ_VAT_RATES = 0x62  # 98 - ДДС ставки
+    CMD_READ_PAYMENTS = 0x64  # 100 - Видове плащане
+    CMD_READ_PARAMETERS = 0x65  # 101 - Параметри
+    CMD_READ_DEPARTMENT = 0x67  # 103 - Отдел
+    CMD_READ_OPERATOR = 0x6A  # 106 - Оператор
+    CMD_READ_PLU = 0x6B  # 107 - Артикул
+    CMD_GET_TAX_ID_NUMBER = 0x63  # 99 - ЕИК/ДДС номер
+    CMD_GET_RECEIPT_STATUS = 0x4C  # 76 - Статус на бон
+    CMD_GET_LAST_DOCUMENT_NUMBER = 0x71  # 113 - Последен номер на документ
+
+    # Отчети (0x70-0x7F)
+    CMD_PRINT_DAILY_REPORT = 0x45  # 69 - Дневен X/Z отчет
+    CMD_PRINT_DEPARTMENT_REPORT = 0x76  # 118 - Отчет по отдели
+    CMD_PRINT_OPERATOR_REPORT = 0x79  # 121 - Операторски отчет
+    CMD_PRINT_PLU_REPORT = 0x77  # 119 - Артикулен отчет
+    CMD_PRINT_FM_REPORT_BY_DATE = 0x78  # 120 - ФП отчет по дата
+    CMD_PRINT_FM_REPORT_BY_NUMBER = 0x79  # 121 - ФП отчет по номер
+    CMD_PRINT_LAST_RECEIPT_DUPLICATE = 0x6D  # 109 - Дубликат на последен бон
+
+    # Електронен дневник (0x70-0x7F)
+    CMD_READ_EJ_BY_DATE = 0x7C  # 124 - Четене на ЕД по дата
+    CMD_READ_EJ_BY_NUMBER = 0x7D  # 125 - Четене на ЕД по номер
+    CMD_PRINT_EJ_BY_DATE = 0x7C  # 124 - Печат на ЕД по дата
+    CMD_READ_LAST_RECEIPT_QR_DATA = 0x74  # 116 - QR данни на последен бон
+
+    # Специални команди (0x80+)
+    CMD_GET_DEVICE_CONSTANTS = 0x80  # 128 - Константи на устройството (Daisy/Incotex)
+    CMD_TO_PINPAD = 0x37  # 55 - Към PinPad (DatecsX)
+    CMD_BEEP = 0x50  # 80 - Звуков сигнал
+
+    # ====================== КРАЙ НА КОМАНДНИ КОНСТАНТИ ======================
 
     def __init__(self, identifier, device):
         super().__init__(identifier, device)
@@ -313,10 +360,10 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
     # ---------------------- Отваряне/затваряне на бон ----------------------
 
     def open_receipt(
-        self,
-        unique_sale_number: str,
-        operator_id: str,
-        operator_password: str,
+            self,
+            unique_sale_number: str,
+            operator_id: str,
+            operator_password: str,
     ) -> Tuple[str, DeviceStatus]:
         """
         Общ ISL header за отваряне на бон:
@@ -349,14 +396,14 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         return "1"
 
     def open_reversal_receipt(
-        self,
-        reason: ReversalReason,
-        receipt_number: str,
-        receipt_datetime: datetime,
-        fiscal_memory_serial_number: str,
-        unique_sale_number: str,
-        operator_id: str,
-        operator_password: str,
+            self,
+            reason: ReversalReason,
+            receipt_number: str,
+            receipt_datetime: datetime,
+            fiscal_memory_serial_number: str,
+            unique_sale_number: str,
+            operator_id: str,
+            operator_password: str,
     ) -> Tuple[str, DeviceStatus]:
         """
         Общ ISL header за сторно бон.
@@ -408,15 +455,15 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         return resp, status
 
     def add_item(
-        self,
-        department: int,
-        item_text: str,
-        unit_price: Decimal,
-        tax_group: TaxGroup,
-        quantity: Decimal = Decimal("0"),
-        price_modifier_value: Decimal = Decimal("0"),
-        price_modifier_type: PriceModifierType = PriceModifierType.NONE,
-        item_code: int = 999,
+            self,
+            department: int,
+            item_text: str,
+            unit_price: Decimal,
+            tax_group: TaxGroup,
+            quantity: Decimal = Decimal("0"),
+            price_modifier_value: Decimal = Decimal("0"),
+            price_modifier_type: PriceModifierType = PriceModifierType.NONE,
+            item_code: int = 999,
     ) -> Tuple[str, DeviceStatus]:
         """
         Общ ISL AddItem, по аналог на BgIslFiscalPrinter:
@@ -445,8 +492,8 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
 
         if price_modifier_type != PriceModifierType.NONE:
             if price_modifier_type in (
-                PriceModifierType.DISCOUNT_PERCENT,
-                PriceModifierType.SURCHARGE_PERCENT,
+                    PriceModifierType.DISCOUNT_PERCENT,
+                    PriceModifierType.SURCHARGE_PERCENT,
             ):
                 sep = ","
             else:
@@ -454,8 +501,8 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
 
             value = price_modifier_value
             if price_modifier_type in (
-                PriceModifierType.DISCOUNT_PERCENT,
-                PriceModifierType.DISCOUNT_AMOUNT,
+                    PriceModifierType.DISCOUNT_PERCENT,
+                    PriceModifierType.DISCOUNT_AMOUNT,
             ):
                 value = -value
 
@@ -577,9 +624,9 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         return TaxGroup[name] if name in TaxGroup.__members__ else TaxGroup.TaxGroup1
 
     def _netfp_build_receipt_info(
-        self,
-        close_receipt_response: str,
-        amount: Optional[Decimal],
+            self,
+            close_receipt_response: str,
+            amount: Optional[Decimal],
     ) -> Dict[str, Any]:
         """
         Генерира ReceiptInfo за Net.FP отговор:
@@ -628,7 +675,7 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
 
     def netfp_print_receipt(self, receipt: Dict[str, Any]) -> Tuple[Dict[str, Any], DeviceStatus]:
         """
-        Общ Net.FP → ISL „рецепта“ за печат на фискален бон.
+        Общ Net.FP → ISL „рецепта" за печат на фискален бон.
 
         receipt е Net.FP Receipt JSON (dict) с полета като:
           uniqueSaleNumber, operator, operatorPassword, items[], payments[].
@@ -724,7 +771,7 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
 
     def netfp_print_reversal_receipt(self, receipt: Dict[str, Any]) -> Tuple[Dict[str, Any], DeviceStatus]:
         """
-        Общ Net.FP → ISL „рецепта“ за сторно бон (ReversalReceipt).
+        Общ Net.FP → ISL „рецепта" за сторно бон (ReversalReceipt).
 
         Очаквани ключове в receipt:
           reason, receiptNumber, receiptDateTime, fiscalMemorySerialNumber,
@@ -880,11 +927,11 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
             amount = p.get("amount") or p.get("paid") or p.get("total") or 0
             # опит за име на payment type
             pt = (
-                p.get("paymentType")
-                or p.get("payment_type")
-                or p.get("method_type")
-                or p.get("method")
-                or "cash"
+                    p.get("paymentType")
+                    or p.get("payment_type")
+                    or p.get("method_type")
+                    or p.get("method")
+                    or "cash"
             )
             norm.append(
                 {
@@ -900,18 +947,18 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         Преобразува стандартния POS JSON бон (какъвто идва по IoT/hw_proxy канала)
         към Net.FP Receipt JSON формат, който netfp_print_receipt очаква.
 
-        Това е „рендер“/адаптер слой – опитва се да покрие най-често срещаните
+        Това е „рендер"/адаптер слой – опитва се да покрие най-често срещаните
         POS структури, без да изисква one-to-one мапинг.
         """
         from decimal import Decimal as D
 
         # Unique Sale Number / идентификатор на бона
         unique_sale_number = (
-            pos_receipt.get("unique_sale_number")
-            or pos_receipt.get("uniqueSaleNumber")
-            or pos_receipt.get("uid")
-            or pos_receipt.get("name")
-            or ""
+                pos_receipt.get("unique_sale_number")
+                or pos_receipt.get("uniqueSaleNumber")
+                or pos_receipt.get("uid")
+                or pos_receipt.get("name")
+                or ""
         )
 
         # Оператор – ако POS не дава, използваме default от options
@@ -929,33 +976,33 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         items: List[Dict[str, Any]] = []
         for line_dict in self._pos_extract_lines(pos_receipt):
             name = (
-                line_dict.get("product_name")
-                or line_dict.get("productName")
-                or line_dict.get("name")
-                or line_dict.get("description")
-                or ""
+                    line_dict.get("product_name")
+                    or line_dict.get("productName")
+                    or line_dict.get("name")
+                    or line_dict.get("description")
+                    or ""
             )
 
             unit_price = (
-                line_dict.get("price_unit")
-                or line_dict.get("priceUnit")
-                or line_dict.get("unit_price")
-                or line_dict.get("price")
-                or 0
+                    line_dict.get("price_unit")
+                    or line_dict.get("priceUnit")
+                    or line_dict.get("unit_price")
+                    or line_dict.get("price")
+                    or 0
             )
             qty = (
-                line_dict.get("qty")
-                or line_dict.get("quantity")
-                or 1
+                    line_dict.get("qty")
+                    or line_dict.get("quantity")
+                    or 1
             )
 
             discount = line_dict.get("discount") or line_dict.get("discountPercent") or 0
 
             # Tax group – ако POS подава index или име
             tax_group = (
-                line_dict.get("taxGroup")
-                or line_dict.get("tax_group")
-                or line_dict.get("tax_group_index")
+                    line_dict.get("taxGroup")
+                    or line_dict.get("tax_group")
+                    or line_dict.get("tax_group_index")
             )
 
             item: Dict[str, Any] = {
@@ -975,10 +1022,10 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
 
         # Обща сума, ако POS я предоставя
         total = (
-            pos_receipt.get("total_with_tax")
-            or pos_receipt.get("totalWithTax")
-            or pos_receipt.get("total")
-            or pos_receipt.get("amount_total")
+                pos_receipt.get("total_with_tax")
+                or pos_receipt.get("totalWithTax")
+                or pos_receipt.get("total")
+                or pos_receipt.get("amount_total")
         )
 
         netfp_receipt: Dict[str, Any] = {
@@ -996,7 +1043,7 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
 
     def pos_print_receipt(self, pos_receipt: Dict[str, Any]) -> Tuple[Dict[str, Any], DeviceStatus]:
         """
-        Врапер за „стандартния“ POS / IoT JSON бон:
+        Врапер за „стандартния" POS / IoT JSON бон:
 
         1) получава POS receipt по hw_proxy / IoT канал;
         2) конвертира го към Net.FP Receipt формат чрез _pos_to_netfp_receipt();
@@ -1105,44 +1152,62 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
     def supported(cls, device):
         """
         Проверява дали този драйвер поддържа устройството.
-
-        Args:
-            device: Може да е string (port path) или dict с device info
         """
+        _logger.info("=" * 80)
+        _logger.info(f"🔍 SUPPORTED() DEBUG: {cls.__name__}")
+        _logger.info("=" * 80)
+
         # Ако това е базовият клас - не поддържа нищо
         if cls.__name__ == 'IslFiscalPrinterBase':
+            _logger.info(f"❌ {cls.__name__}: Base class - skipping")
             return False
 
         # Ако няма detect_device метод - не може да детектира
         if not hasattr(cls, 'detect_device'):
-            _logger.debug(f"{cls.__name__}: No detect_device method")
+            _logger.warning(f"❌ {cls.__name__}: No detect_device method")
             return False
 
+        _logger.info(f"✅ {cls.__name__}: Has detect_device method")
+
         # Извлечи port path от device
+        _logger.info(f"📦 Device input type: {type(device)}")
+        _logger.info(f"📦 Device input value: {device}")
+
         if isinstance(device, str):
             port = device
+            _logger.info(f"✅ Device is string: {port}")
         elif isinstance(device, dict):
-            port = device.get('port') or device.get('device')
+            port = device.get('identifier') or device.get('device')
+            _logger.info(f"✅ Device is dict, extracted port: {port}")
         else:
-            _logger.debug(f"{cls.__name__}: Unknown device type: {type(device)}")
+            _logger.warning(f"❌ {cls.__name__}: Unknown device type: {type(device)}")
             return False
 
         if not port or not isinstance(port, str):
+            _logger.warning(f"❌ {cls.__name__}: Invalid port: {port}")
             return False
 
         # Провери дали е serial port
         if not port.startswith('/dev/tty'):
+            _logger.info(f"❌ {cls.__name__}: Not a serial port: {port}")
             return False
 
-        _logger.debug(f"{cls.__name__}: Trying to detect on {port}")
+        _logger.info(f"✅ {cls.__name__}: Valid serial port: {port}")
+
+        _logger.info(f"🔍 {cls.__name__}: Trying to detect on {port}")
 
         try:
             import serial
 
-            # Вземи baudrate от protocol или default
+            # Вземи baudrate от protocol
             baudrate = 115200
             if hasattr(cls, '_protocol') and hasattr(cls._protocol, 'baudrate'):
                 baudrate = cls._protocol.baudrate
+                _logger.info(f"✅ Using baudrate from protocol: {baudrate}")
+            else:
+                _logger.info(f"⚠️ Using default baudrate: {baudrate}")
+
+            _logger.info(f"🔌 {cls.__name__}: Opening {port} at {baudrate} baud")
 
             connection = serial.Serial(
                 port=port,
@@ -1154,24 +1219,36 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
                 write_timeout=0.5,
             )
 
+            _logger.info(f"✅ {cls.__name__}: Serial connection opened successfully")
+
             try:
                 connection.reset_input_buffer()
                 connection.reset_output_buffer()
+                _logger.info(f"✅ {cls.__name__}: Buffers reset")
 
                 # Викай detect_device
+                _logger.info(f"📡 {cls.__name__}: Calling detect_device()")
                 device_info = cls.detect_device(connection, baudrate)
 
+                _logger.info(f"📡 {cls.__name__}: detect_device() returned: {device_info}")
+
                 if device_info:
-                    _logger.info(f"✅ {cls.__name__} detected device on {port}")
+                    _logger.info(f"✅ {cls.__name__} DETECTED device on {port}")
+                    _logger.info(f"   Device info: {device_info}")
+                    _logger.info("=" * 80)
                     return True
                 else:
-                    _logger.debug(f"{cls.__name__}: No device detected on {port}")
+                    _logger.info(f"❌ {cls.__name__}: No device detected on {port}")
+                    _logger.info("=" * 80)
                     return False
 
             finally:
                 connection.close()
+                _logger.info(f"🔌 {cls.__name__}: Serial connection closed")
 
         except Exception as e:
-            _logger.debug(f"{cls.__name__}: Detection failed on {port}: {e}")
+            _logger.error(f"⚠️ {cls.__name__}: Detection EXCEPTION on {port}")
+            _logger.error(f"   Exception type: {type(e).__name__}")
+            _logger.error(f"   Exception message: {e}", exc_info=True)
+            _logger.info("=" * 80)
             return False
-
