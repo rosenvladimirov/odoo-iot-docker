@@ -15,7 +15,7 @@ Datecs ISL Fiscal Printer Driver
 import logging
 import time
 from threading import Lock
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 from decimal import Decimal
 from abc import abstractmethod
 
@@ -481,129 +481,104 @@ class DatecsPCIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
     """
     Datecs P/C протокол драйвер.
 
-    Поддържани модели:
-    - DP-25, DP-25X
-    - DP-05, DP-05C
-    - WP-50, WP-50X
-    - DP-35, DP-150
-
-    Характеристики:
-    - Device info: 6 полета, разделени със запетая
-    - Baudrate: обикновено 38400 или 115200
-    - Формат: Model,FW,Date,Checksum,Serial,FM_Serial
+    ВАЖНО: В продукционна среда baudrate се конфигурира предварително
+    чрез IoBox Hardware Manager. Сканирането на множество скорости е само
+    за fallback в developer режим.
     """
 
     device_name = "Datecs P/C ISL Fiscal Printer"
     priority = 95
 
     @classmethod
+    def get_baudrates_to_try(cls) -> List[int]:
+        """Override - Datecs P/C приоритизация."""
+        return [115200, 38400, 9600, 19200]
+
+    @classmethod
     def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
-        """Детекция на Datecs P/C устройство."""
-        _logger.info("=" * 80)
-        _logger.info("🔍 DATECS P/C DETECTION")
-        _logger.info(f"   Port: {connection.port}")
-        _logger.info("=" * 80)
+        """
+        Детекция на Datecs P/C устройство на ОТВОРЕНА connection.
 
-        baudrates_to_try = [115200, 38400, 9600, 19200, 57600]
+        ВАЖНО:
+        - connection е ВЕЧЕ отворена на baudrate
+        - НЕ променяме baudrate-а
+        - НЕ затваряме connection-а
+        """
+        _logger.info(f"🔍 DATECS P/C DETECTION at {baudrate} baud")
 
-        for try_baudrate in baudrates_to_try:
-            _logger.info(f"\n{'=' * 60}")
-            _logger.info(f"🔄 Testing baudrate: {try_baudrate}")
-            _logger.info(f"{'=' * 60}")
+        try:
+            # ISL STATUS команда
+            seq = 0x20
+            message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            try:
-                connection.baudrate = try_baudrate
-                connection.timeout = 2.0
-                connection.write_timeout = 2.0
+            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            connection.write(message)
+            connection.flush()
 
-                for _ in range(3):
-                    connection.reset_input_buffer()
-                    connection.reset_output_buffer()
-                    time.sleep(0.1)
+            time.sleep(0.5)
 
-                time.sleep(0.8)
+            response = connection.read(256)
+            _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
 
-                # ISL STATUS команда
-                seq = 0x20
-                message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
+            if not response or len(response) < 10:
+                return None
 
-                _logger.info(f"   📤 TX: {message.hex(' ')}")
-                connection.write(message)
-                connection.flush()
+            if response[0:1] != bytes([cls.MARKER_PREAMBLE]):
+                return None
 
-                time.sleep(0.8)
+            if not cls._validate_checksum(response):
+                return None
 
-                response = connection.read(256)
-                _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
+            _logger.info(f"   ✅ Valid ISL response!")
 
-                if response and len(response) >= 10:
-                    if response[0:1] == bytes([cls.MARKER_PREAMBLE]):
-                        if cls._validate_checksum(response):
-                            _logger.info(f"   ✅ Valid ISL response at {try_baudrate}!")
+            # Изчакай устройството
+            connection.reset_input_buffer()
+            time.sleep(0.3)
 
-                            # Изчакай устройството
-                            connection.reset_input_buffer()
-                            time.sleep(0.5)
+            # Device info със параметър "1"
+            info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'1', seq + 1)
+            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
+            connection.write(info_msg)
+            connection.flush()
 
-                            while connection.in_waiting > 0:
-                                connection.read(connection.in_waiting)
-                                time.sleep(0.1)
+            time.sleep(0.8)
 
-                            time.sleep(0.5)
+            info_resp = bytearray()
+            start_time = time.time()
+            while time.time() - start_time < 1.5:
+                if connection.in_waiting > 0:
+                    chunk = connection.read(connection.in_waiting)
+                    info_resp.extend(chunk)
+                    time.sleep(0.05)
+                else:
+                    if len(info_resp) > 0:
+                        time.sleep(0.2)
+                        if connection.in_waiting == 0:
+                            break
+                    else:
+                        time.sleep(0.05)
 
-                            # Device info със параметър "1"
-                            info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'1', seq + 1)
-                            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
-                            connection.write(info_msg)
-                            connection.flush()
+            info_resp = bytes(info_resp)
+            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
 
-                            time.sleep(1.5)
+            if info_resp and len(info_resp) > 20:
+                device_info = cls._parse_device_info(info_resp)
+                if device_info:
+                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
+                    return device_info
 
-                            info_resp = bytearray()
-                            start_time = time.time()
-                            while time.time() - start_time < 2.0:
-                                if connection.in_waiting > 0:
-                                    chunk = connection.read(connection.in_waiting)
-                                    info_resp.extend(chunk)
-                                    time.sleep(0.1)
-                                else:
-                                    if len(info_resp) > 0:
-                                        time.sleep(0.3)
-                                        if connection.in_waiting == 0:
-                                            break
-                                    else:
-                                        time.sleep(0.1)
+            # Fallback - ако имаме валиден ISL отговор, но не можем да парсваме info
+            return {
+                'manufacturer': 'Datecs',
+                'model': 'Datecs P/C',
+                'serial_number': 'DETECTED',
+                'protocol_name': 'datecs.p.isl',
+            }
 
-                            info_resp = bytes(info_resp)
-                            _logger.info(
-                                f"   📥 RX (device info, {len(info_resp)} bytes): {info_resp.hex(' ') if info_resp else 'TIMEOUT'}")
-
-                            if info_resp and len(info_resp) > 20:
-                                device_info = cls._parse_device_info(info_resp)
-                                if device_info:
-                                    device_info['detected_baudrate'] = try_baudrate
-                                    _logger.info(f"   📋 Model: {device_info.get('model')}")
-                                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
-                                    _logger.info("=" * 80)
-                                    return device_info
-
-                            # Fallback
-                            return {
-                                'manufacturer': 'Datecs',
-                                'model': 'Datecs P/C',
-                                'serial_number': 'DETECTED',
-                                'protocol_name': 'datecs.p.isl',
-                                'detected_baudrate': try_baudrate,
-                            }
-
-            except Exception as e:
-                _logger.error(f"   ⚠️ Exception at {try_baudrate}: {e}", exc_info=True)
-                continue
-
-        _logger.info("\n" + "=" * 80)
-        _logger.info("❌ NO DATECS P/C DEVICE DETECTED")
-        _logger.info("=" * 80)
-        return None
+        except Exception as e:
+            _logger.error(f"   ⚠️ Exception: {e}", exc_info=True)
+            return None
 
     @staticmethod
     def _parse_device_info(response: bytes) -> Optional[Dict[str, Any]]:
@@ -663,100 +638,89 @@ class DatecsXIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
     priority = 96
 
     @classmethod
+    def get_baudrates_to_try(cls) -> List[int]:
+        """Override - Datecs X приоритизация."""
+        return [115200, 57600, 38400, 19200]
+
+    @classmethod
     def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
-        """Детекция на Datecs X устройство."""
-        _logger.info("=" * 80)
-        _logger.info("🔍 DATECS X DETECTION")
-        _logger.info(f"   Port: {connection.port}")
-        _logger.info("=" * 80)
+        """
+        Детекция на Datecs X устройство на ОТВОРЕНА connection.
 
-        baudrates_to_try = [115200, 57600, 38400, 19200]
+        ВАЖНО:
+        - connection е ВЕЧЕ отворена на baudrate
+        - НЕ променяме baudrate-а
+        - НЕ затваряме connection-а
+        """
+        _logger.info(f"🔍 DATECS X DETECTION at {baudrate} baud")
 
-        for try_baudrate in baudrates_to_try:
-            _logger.info(f"\n{'=' * 60}")
-            _logger.info(f"🔄 Testing baudrate: {try_baudrate}")
-            _logger.info(f"{'=' * 60}")
+        try:
+            # ISL STATUS команда
+            seq = 0x20
+            message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            try:
-                connection.baudrate = try_baudrate
-                connection.timeout = 2.0
-                connection.write_timeout = 2.0
+            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            connection.write(message)
+            connection.flush()
 
-                for _ in range(3):
-                    connection.reset_input_buffer()
-                    connection.reset_output_buffer()
-                    time.sleep(0.1)
+            time.sleep(0.5)
 
-                time.sleep(0.8)
+            response = connection.read(256)
+            _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
 
-                seq = 0x20
-                message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
+            if not response or len(response) < 10:
+                return None
 
-                _logger.info(f"   📤 TX: {message.hex(' ')}")
-                connection.write(message)
-                connection.flush()
+            if response[0:1] != bytes([cls.MARKER_PREAMBLE]):
+                return None
 
-                time.sleep(0.8)
+            if not cls._validate_checksum(response):
+                return None
 
-                response = connection.read(256)
-                _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
+            _logger.info(f"   ✅ Valid ISL response!")
 
-                if response and len(response) >= 10:
-                    if response[0:1] == bytes([cls.MARKER_PREAMBLE]):
-                        if cls._validate_checksum(response):
-                            _logger.info(f"   ✅ Valid ISL response at {try_baudrate}!")
+            # Изчакай устройството
+            connection.reset_input_buffer()
+            time.sleep(0.3)
 
-                            connection.reset_input_buffer()
-                            time.sleep(0.5)
+            # Device info със параметър "1"
+            info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'1', seq + 1)
+            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
+            connection.write(info_msg)
+            connection.flush()
 
-                            while connection.in_waiting > 0:
-                                connection.read(connection.in_waiting)
-                                time.sleep(0.1)
+            time.sleep(0.8)
 
-                            time.sleep(0.5)
+            info_resp = bytearray()
+            start_time = time.time()
+            while time.time() - start_time < 1.5:
+                if connection.in_waiting > 0:
+                    chunk = connection.read(connection.in_waiting)
+                    info_resp.extend(chunk)
+                    time.sleep(0.05)
+                else:
+                    if len(info_resp) > 0:
+                        time.sleep(0.2)
+                        if connection.in_waiting == 0:
+                            break
+                    else:
+                        time.sleep(0.05)
 
-                            info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'1', seq + 1)
-                            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
-                            connection.write(info_msg)
-                            connection.flush()
+            info_resp = bytes(info_resp)
+            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
 
-                            time.sleep(1.5)
+            if info_resp and len(info_resp) > 20:
+                device_info = cls._parse_device_info(info_resp)
+                if device_info:
+                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
+                    return device_info
 
-                            info_resp = bytearray()
-                            start_time = time.time()
-                            while time.time() - start_time < 2.0:
-                                if connection.in_waiting > 0:
-                                    chunk = connection.read(connection.in_waiting)
-                                    info_resp.extend(chunk)
-                                    time.sleep(0.1)
-                                else:
-                                    if len(info_resp) > 0:
-                                        time.sleep(0.3)
-                                        if connection.in_waiting == 0:
-                                            break
-                                    else:
-                                        time.sleep(0.1)
+            return None
 
-                            info_resp = bytes(info_resp)
-                            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
-
-                            if info_resp and len(info_resp) > 20:
-                                device_info = cls._parse_device_info(info_resp)
-                                if device_info:
-                                    device_info['detected_baudrate'] = try_baudrate
-                                    _logger.info(f"   📋 Model: {device_info.get('model')}")
-                                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
-                                    _logger.info("=" * 80)
-                                    return device_info
-
-            except Exception as e:
-                _logger.error(f"   ⚠️ Exception at {try_baudrate}: {e}", exc_info=True)
-                continue
-
-        _logger.info("\n" + "=" * 80)
-        _logger.info("❌ NO DATECS X DEVICE DETECTED")
-        _logger.info("=" * 80)
-        return None
+        except Exception as e:
+            _logger.error(f"   ⚠️ Exception: {e}", exc_info=True)
+            return None
 
     @staticmethod
     def _parse_device_info(response: bytes) -> Optional[Dict[str, Any]]:
@@ -815,109 +779,95 @@ class DatecsFPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
     priority = 94
 
     @classmethod
+    def get_baudrates_to_try(cls) -> List[int]:
+        """Override - Datecs FP приоритизация."""
+        return [9600, 19200, 115200, 38400]
+
+    @classmethod
     def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
-        """Детекция на Datecs FP устройство."""
-        _logger.info("=" * 80)
-        _logger.info("🔍 DATECS FP DETECTION")
-        _logger.info(f"   Port: {connection.port}")
-        _logger.info("=" * 80)
+        """
+        Детекция на Datecs FP устройство на ОТВОРЕНА connection.
 
-        baudrates_to_try = [9600, 19200, 115200, 38400]
+        ВАЖНО:
+        - connection е ВЕЧЕ отворена на baudrate
+        - НЕ променяме baudrate-а
+        - НЕ затваряме connection-а
+        """
+        _logger.info(f"🔍 DATECS FP DETECTION at {baudrate} baud")
 
-        for try_baudrate in baudrates_to_try:
-            _logger.info(f"\n{'=' * 60}")
-            _logger.info(f"🔄 Testing baudrate: {try_baudrate}")
-            _logger.info(f"{'=' * 60}")
+        try:
+            # ISL STATUS команда
+            seq = 0x20
+            message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            try:
-                connection.baudrate = try_baudrate
-                connection.timeout = 2.0
-                connection.write_timeout = 2.0
+            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            connection.write(message)
+            connection.flush()
 
-                for _ in range(3):
-                    connection.reset_input_buffer()
-                    connection.reset_output_buffer()
-                    time.sleep(0.1)
+            time.sleep(0.5)
 
-                time.sleep(0.8)
+            response = connection.read(256)
+            _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
 
-                seq = 0x20
-                message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
+            if not response or len(response) < 10:
+                return None
 
-                _logger.info(f"   📤 TX: {message.hex(' ')}")
-                connection.write(message)
-                connection.flush()
+            if response[0:1] != bytes([cls.MARKER_PREAMBLE]):
+                return None
 
-                time.sleep(0.8)
+            if not cls._validate_checksum(response):
+                return None
 
-                response = connection.read(256)
-                _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
+            _logger.info(f"   ✅ Valid ISL response!")
 
-                if response and len(response) >= 10:
-                    if response[0:1] == bytes([cls.MARKER_PREAMBLE]):
-                        if cls._validate_checksum(response):
-                            _logger.info(f"   ✅ Valid ISL response at {try_baudrate}!")
+            # Изчакай устройството
+            connection.reset_input_buffer()
+            time.sleep(0.3)
 
-                            connection.reset_input_buffer()
-                            time.sleep(0.5)
+            # Device info със параметър "1"
+            info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'1', seq + 1)
+            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
+            connection.write(info_msg)
+            connection.flush()
 
-                            while connection.in_waiting > 0:
-                                connection.read(connection.in_waiting)
-                                time.sleep(0.1)
+            time.sleep(0.8)
 
-                            time.sleep(0.5)
+            info_resp = bytearray()
+            start_time = time.time()
+            while time.time() - start_time < 1.5:
+                if connection.in_waiting > 0:
+                    chunk = connection.read(connection.in_waiting)
+                    info_resp.extend(chunk)
+                    time.sleep(0.05)
+                else:
+                    if len(info_resp) > 0:
+                        time.sleep(0.2)
+                        if connection.in_waiting == 0:
+                            break
+                    else:
+                        time.sleep(0.05)
 
-                            info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'1', seq + 1)
-                            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
-                            connection.write(info_msg)
-                            connection.flush()
+            info_resp = bytes(info_resp)
+            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
 
-                            time.sleep(1.5)
+            if info_resp and len(info_resp) > 20:
+                device_info = cls._parse_device_info(info_resp)
+                if device_info:
+                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
+                    return device_info
 
-                            info_resp = bytearray()
-                            start_time = time.time()
-                            while time.time() - start_time < 2.0:
-                                if connection.in_waiting > 0:
-                                    chunk = connection.read(connection.in_waiting)
-                                    info_resp.extend(chunk)
-                                    time.sleep(0.1)
-                                else:
-                                    if len(info_resp) > 0:
-                                        time.sleep(0.3)
-                                        if connection.in_waiting == 0:
-                                            break
-                                    else:
-                                        time.sleep(0.1)
+            # Fallback
+            return {
+                'manufacturer': 'Datecs',
+                'model': 'Datecs FP',
+                'serial_number': 'DETECTED',
+                'protocol_name': 'datecs.fp.isl',
+            }
 
-                            info_resp = bytes(info_resp)
-                            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
-
-                            if info_resp and len(info_resp) > 20:
-                                device_info = cls._parse_device_info(info_resp)
-                                if device_info:
-                                    device_info['detected_baudrate'] = try_baudrate
-                                    _logger.info(f"   📋 Model: {device_info.get('model')}")
-                                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
-                                    _logger.info("=" * 80)
-                                    return device_info
-
-                            # Fallback
-                            return {
-                                'manufacturer': 'Datecs',
-                                'model': 'Datecs FP',
-                                'serial_number': 'DETECTED',
-                                'protocol_name': 'datecs.fp.isl',
-                                'detected_baudrate': try_baudrate,
-                            }
-
-            except Exception as e:
-                _logger.error(f"   ⚠️ Exception at {try_baudrate}: {e}", exc_info=True)
-                continue
-
-        _logger.info("\n" + "=" * 80)
-        _logger.info("❌ NO DATECS FP DEVICE DETECTED")
-        _logger.info("=" * 80)
-        return None
+        except Exception as e:
+            _logger.error(f"   ⚠️ Exception: {e}", exc_info=True)
+            return None
 
     @staticmethod
     def _parse_device_info(response: bytes) -> Optional[Dict[str, Any]]:
@@ -933,8 +883,6 @@ class DatecsFPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             data_str = data.decode('cp1251', errors='ignore')
             _logger.info(f"   Data string: '{data_str}'")
 
-            # FP протоколът има различен формат
-            # Опитваме се да извлечем каквото можем
             fields = data_str.split(',')
 
             if len(fields) >= 3:
@@ -994,140 +942,117 @@ class DatecsFMPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
         )
 
     @classmethod
+    def get_baudrates_to_try(cls) -> List[int]:
+        """Override - Datecs FMP v2 приоритизация."""
+        return [115200, 57600, 38400, 19200]
+
+    @classmethod
     def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
-        """Детекция на Datecs FMP/FP v2 устройство."""
-        _logger.info("=" * 80)
-        _logger.info("🔍 DATECS FMP/FP v2 DETECTION")
-        _logger.info(f"   Port: {connection.port}")
-        _logger.info("=" * 80)
+        """
+        Детекция на Datecs FMP/FP v2 устройство на ОТВОРЕНА connection.
 
-        baudrates_to_try = [115200, 57600, 38400, 19200]
+        ВАЖНО:
+        - connection е ВЕЧЕ отворена на baudrate
+        - НЕ променяме baudrate-а
+        - НЕ затваряме connection-а
+        """
+        _logger.info(f"🔍 DATECS FMP/FP v2 DETECTION at {baudrate} baud")
 
-        for try_baudrate in baudrates_to_try:
-            _logger.info(f"\n{'=' * 60}")
-            _logger.info(f"🔄 Testing baudrate: {try_baudrate}")
-            _logger.info(f"{'=' * 60}")
+        try:
+            # ISL STATUS команда
+            seq = 0x20
+            message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            try:
-                connection.baudrate = try_baudrate
-                connection.timeout = 2.0
-                connection.write_timeout = 2.0
+            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            connection.write(message)
+            connection.flush()
 
-                for _ in range(3):
-                    connection.reset_input_buffer()
-                    connection.reset_output_buffer()
-                    time.sleep(0.1)
+            time.sleep(0.5)
 
-                time.sleep(0.8)
+            response = connection.read(256)
+            _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
 
-                # STATUS команда
-                seq = 0x20
-                message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
+            if not response or len(response) < 10:
+                return None
 
-                _logger.info(f"   📤 TX: {message.hex(' ')}")
-                connection.write(message)
-                connection.flush()
+            if response[0:1] != bytes([cls.MARKER_PREAMBLE]):
+                return None
 
-                time.sleep(0.8)
+            if not cls._validate_checksum(response):
+                return None
 
-                response = connection.read(256)
-                _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
+            _logger.info(f"   ✅ Valid ISL response!")
 
-                if response and len(response) >= 10:
-                    if response[0:1] == bytes([cls.MARKER_PREAMBLE]):
-                        if cls._validate_checksum(response):
-                            _logger.info(f"   ✅ Valid ISL response at {try_baudrate}!")
+            # Проверка за 8-байтов статус (FMP v2 характеристика)
+            sep_pos = response.find(bytes([cls.MARKER_SEPARATOR]))
+            pst_pos = response.find(bytes([cls.MARKER_POSTAMBLE]))
 
-                            # Проверка за 8-байтов статус (FMP v2 характеристика)
-                            sep_pos = response.find(bytes([cls.MARKER_SEPARATOR]))
-                            pst_pos = response.find(bytes([cls.MARKER_POSTAMBLE]))
+            if sep_pos > 0 and pst_pos > sep_pos:
+                status_bytes = response[sep_pos + 1:pst_pos]
+                _logger.info(f"   Status bytes length: {len(status_bytes)}")
 
-                            if sep_pos > 0 and pst_pos > sep_pos:
-                                status_bytes = response[sep_pos + 1:pst_pos]
-                                _logger.info(f"   Status bytes length: {len(status_bytes)}")
+                if len(status_bytes) == 8:
+                    _logger.info("   ✅ Detected 8-byte status (FMP v2 protocol)")
+                elif len(status_bytes) == 6:
+                    _logger.info("   ⚠️ 6-byte status (standard ISL, not FMP v2)")
+                    return None  # Не е FMP v2
 
-                                if len(status_bytes) == 8:
-                                    _logger.info("   ✅ Detected 8-byte status (FMP v2 protocol)")
-                                elif len(status_bytes) == 6:
-                                    _logger.info("   ⚠️ 6-byte status (standard ISL, not FMP v2)")
-                                    continue  # Не е FMP v2
+            # Изчакай устройството
+            connection.reset_input_buffer()
+            time.sleep(0.3)
 
-                            connection.reset_input_buffer()
-                            time.sleep(0.5)
+            # Device info
+            info_msg = cls._build_detection_message(0x5A, b'1', seq + 1)
+            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
+            connection.write(info_msg)
+            connection.flush()
 
-                            while connection.in_waiting > 0:
-                                connection.read(connection.in_waiting)
-                                time.sleep(0.1)
+            time.sleep(0.8)
 
-                            time.sleep(0.5)
+            info_resp = bytearray()
+            start_time = time.time()
+            while time.time() - start_time < 1.5:
+                if connection.in_waiting > 0:
+                    chunk = connection.read(connection.in_waiting)
+                    info_resp.extend(chunk)
+                    time.sleep(0.05)
+                else:
+                    if len(info_resp) > 0:
+                        time.sleep(0.2)
+                        if connection.in_waiting == 0:
+                            break
+                    else:
+                        time.sleep(0.05)
 
-                            # Device info с параметър "1" (cmd 90/5Ah)
-                            # Изграждаме командата с hex код 5A вместо ASCII
-                            info_msg = cls._build_detection_message(0x5A, b'1', seq + 1)
-                            _logger.info(f"   📤 TX (device info cmd 90): {info_msg.hex(' ')}")
-                            connection.write(info_msg)
-                            connection.flush()
+            info_resp = bytes(info_resp)
+            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
 
-                            time.sleep(1.5)
+            if info_resp and len(info_resp) > 20:
+                device_info = cls._parse_device_info(info_resp)
+                if device_info:
+                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
+                    return device_info
 
-                            info_resp = bytearray()
-                            start_time = time.time()
-                            while time.time() - start_time < 2.0:
-                                if connection.in_waiting > 0:
-                                    chunk = connection.read(connection.in_waiting)
-                                    info_resp.extend(chunk)
-                                    time.sleep(0.1)
-                                else:
-                                    if len(info_resp) > 0:
-                                        time.sleep(0.3)
-                                        if connection.in_waiting == 0:
-                                            break
-                                    else:
-                                        time.sleep(0.1)
+            # Fallback
+            return {
+                'manufacturer': 'Datecs',
+                'model': 'Datecs FMP v2',
+                'serial_number': 'DETECTED',
+                'protocol_name': 'datecs.fmp.isl',
+            }
 
-                            info_resp = bytes(info_resp)
-                            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
-
-                            if info_resp and len(info_resp) > 20:
-                                device_info = cls._parse_device_info(info_resp)
-                                if device_info:
-                                    device_info['detected_baudrate'] = try_baudrate
-                                    _logger.info(f"   📋 Model: {device_info.get('model')}")
-                                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
-                                    _logger.info(f"   📋 Firmware: {device_info.get('firmware_version')}")
-                                    _logger.info("=" * 80)
-                                    return device_info
-
-                            # Fallback
-                            return {
-                                'manufacturer': 'Datecs',
-                                'model': 'Datecs FMP v2',
-                                'serial_number': 'DETECTED',
-                                'protocol_name': 'datecs.fmp.isl',
-                                'detected_baudrate': try_baudrate,
-                            }
-
-            except Exception as e:
-                _logger.error(f"   ⚠️ Exception at {try_baudrate}: {e}", exc_info=True)
-                continue
-
-        _logger.info("\n" + "=" * 80)
-        _logger.info("❌ NO DATECS FMP/FP v2 DEVICE DETECTED")
-        _logger.info("=" * 80)
-        return None
+        except Exception as e:
+            _logger.error(f"   ⚠️ Exception: {e}", exc_info=True)
+            return None
 
     @staticmethod
     def _parse_device_info(response: bytes) -> Optional[Dict[str, Any]]:
-        """
-        Парсва Datecs FMP/FP v2 device info (8 полета с табулация).
-
-        Според cmd 90 (5Ah) формат:
-        {ErrorCode}\t{Name}\t{FwRev}\t{FwDate}\t{FwTime}\t{Checksum}\t{Sw}\t{SerialNumber}\t{FMNumber}
-        """
+        """Парсва Datecs FMP/FP v2 device info (8/9 полета с табулация)."""
         try:
             _logger.info(f"   🔍 Parsing Datecs FMP v2 device info from {len(response)} bytes")
 
-            sep_pos = response.find(bytes([0x04]))  # SEPARATOR
+            sep_pos = response.find(bytes([0x04]))
             if sep_pos == -1 or sep_pos <= 4:
                 return None
 
@@ -1135,49 +1060,27 @@ class DatecsFMPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             data_str = data.decode('cp1251', errors='ignore')
             _logger.info(f"   Data string: '{data_str}'")
 
-            # FMP v2 използва табулация като separator
             fields = data_str.split('\t')
             _logger.info(f"   Tab-separated fields: {len(fields)}")
 
-            # Проверка за ErrorCode в началото
-            if len(fields) >= 1:
-                try:
-                    error_code = int(fields[0])
-                    if error_code != 0:
-                        _logger.warning(f"   ⚠️ ErrorCode = {error_code}")
-                except ValueError:
-                    pass  # ErrorCode не е число
-
-            # Формат според документацията: ErrorCode, Name, FwRev, FwDate, FwTime, Checksum, Sw, SerialNumber, FMNumber
             if len(fields) >= 9:
-                _logger.info("   ✅ Detected Datecs FMP v2 protocol (9+ tab fields with ErrorCode)")
-
-                # Съставяме firmware version от FwRev, FwDate, FwTime
+                _logger.info("   ✅ Detected Datecs FMP v2 protocol (9+ tab fields)")
                 fw_version = f"{fields[2]} {fields[3]} {fields[4]}".strip()
-
                 return {
                     'manufacturer': 'Datecs',
-                    'model': fields[1].strip(),  # Name
+                    'model': fields[1].strip(),
                     'firmware_version': fw_version,
-                    'firmware_checksum': fields[5].strip(),  # Checksum
-                    'software_version': fields[6].strip(),  # Sw
-                    'serial_number': fields[7].strip(),  # SerialNumber
-                    'fiscal_memory_serial': fields[8].strip(),  # FMNumber
+                    'serial_number': fields[7].strip(),
+                    'fiscal_memory_serial': fields[8].strip(),
                     'protocol_name': 'datecs.fmp.isl',
                 }
-
-            # Алтернативен формат - без ErrorCode в началото (8 полета)
             elif len(fields) >= 8:
                 _logger.info("   ✅ Detected Datecs FMP v2 protocol (8 tab fields)")
-
                 fw_version = f"{fields[1]} {fields[2]} {fields[3]}".strip()
-
                 return {
                     'manufacturer': 'Datecs',
                     'model': fields[0].strip(),
                     'firmware_version': fw_version,
-                    'firmware_checksum': fields[4].strip(),
-                    'software_version': fields[5].strip(),
                     'serial_number': fields[6].strip(),
                     'fiscal_memory_serial': fields[7].strip(),
                     'protocol_name': 'datecs.fmp.isl',
@@ -1461,143 +1364,114 @@ class DatecsFPv1IslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
         )
 
     @classmethod
+    def get_baudrates_to_try(cls) -> List[int]:
+        """Override - Datecs FP v1.00BG приоритизация."""
+        return [115200, 9600, 19200, 38400, 57600]
+
+    @classmethod
     def detect_device(cls, connection, baudrate: int) -> Optional[Dict[str, Any]]:
-        """Детекция на Datecs FP v1.00BG устройство."""
-        _logger.info("=" * 80)
-        _logger.info("🔍 DATECS FP v1.00BG DETECTION")
-        _logger.info(f"   Port: {connection.port}")
-        _logger.info("=" * 80)
+        """
+        Детекция на Datecs FP v1.00BG устройство на ОТВОРЕНА connection.
 
-        # FP v1.00BG поддържа много baudrate-и (конфигурируеми)
-        baudrates_to_try = [115200, 9600, 19200, 38400, 57600, 4800, 2400, 1200]
+        ВАЖНО:
+        - connection е ВЕЧЕ отворена на baudrate
+        - НЕ променяме baudrate-а
+        - НЕ затваряме connection-а
+        """
+        _logger.info(f"🔍 DATECS FP v1.00BG DETECTION at {baudrate} baud")
 
-        for try_baudrate in baudrates_to_try:
-            _logger.info(f"\n{'=' * 60}")
-            _logger.info(f"🔄 Testing baudrate: {try_baudrate}")
-            _logger.info(f"{'=' * 60}")
+        try:
+            # ISL STATUS команда
+            seq = 0x20
+            message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            try:
-                connection.baudrate = try_baudrate
-                connection.timeout = 2.0
-                connection.write_timeout = 2.0
+            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            connection.write(message)
+            connection.flush()
 
-                for _ in range(3):
-                    connection.reset_input_buffer()
-                    connection.reset_output_buffer()
-                    time.sleep(0.1)
+            time.sleep(0.5)
 
-                time.sleep(0.8)
+            response = connection.read(256)
+            _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
 
-                # STATUS команда
-                seq = 0x20
-                message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
+            if not response or len(response) < 10:
+                return None
 
-                _logger.info(f"   📤 TX: {message.hex(' ')}")
-                connection.write(message)
-                connection.flush()
+            if response[0:1] != bytes([cls.MARKER_PREAMBLE]):
+                return None
 
-                time.sleep(0.8)
+            if not cls._validate_checksum(response):
+                return None
 
-                response = connection.read(256)
-                _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
+            _logger.info(f"   ✅ Valid ISL response!")
 
-                if response and len(response) >= 10:
-                    if response[0:1] == bytes([cls.MARKER_PREAMBLE]):
-                        if cls._validate_checksum(response):
-                            _logger.info(f"   ✅ Valid ISL response at {try_baudrate}!")
+            # Проверка за 6-байтов статус
+            sep_pos = response.find(bytes([cls.MARKER_SEPARATOR]))
+            pst_pos = response.find(bytes([cls.MARKER_POSTAMBLE]))
 
-                            # Проверка за 6-байтов статус (FP v1.00BG характеристика)
-                            sep_pos = response.find(bytes([cls.MARKER_SEPARATOR]))
-                            pst_pos = response.find(bytes([cls.MARKER_POSTAMBLE]))
+            if sep_pos > 0 and pst_pos > sep_pos:
+                status_bytes = response[sep_pos + 1:pst_pos]
+                _logger.info(f"   Status bytes length: {len(status_bytes)}")
+                if len(status_bytes) != 6:
+                    _logger.info(f"   ⚠️ Not 6-byte status, skipping")
+                    return None
 
-                            if sep_pos > 0 and pst_pos > sep_pos:
-                                status_bytes = response[sep_pos + 1:pst_pos]
-                                _logger.info(f"   Status bytes length: {len(status_bytes)}")
+            # Изчакай устройството
+            connection.reset_input_buffer()
+            time.sleep(0.3)
 
-                                # FP v1.00BG има 6 байта статус
-                                if len(status_bytes) != 6:
-                                    _logger.info(f"   ⚠️ Not 6-byte status, skipping")
-                                    continue
+            # Device info
+            info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'*1', seq + 1)
+            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
+            connection.write(info_msg)
+            connection.flush()
 
-                            connection.reset_input_buffer()
-                            time.sleep(0.5)
+            time.sleep(0.8)
 
-                            while connection.in_waiting > 0:
-                                connection.read(connection.in_waiting)
-                                time.sleep(0.1)
+            info_resp = bytearray()
+            start_time = time.time()
+            while time.time() - start_time < 1.5:
+                if connection.in_waiting > 0:
+                    chunk = connection.read(connection.in_waiting)
+                    info_resp.extend(chunk)
+                    time.sleep(0.05)
+                else:
+                    if len(info_resp) > 0:
+                        time.sleep(0.2)
+                        if connection.in_waiting == 0:
+                            break
+                    else:
+                        time.sleep(0.05)
 
-                            time.sleep(0.5)
+            info_resp = bytes(info_resp)
+            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
 
-                            # Device info с CMD_GET_DEVICE_INFO (5Ah/90)
-                            # FP v1.00BG cmd 90: [*]<Calc>
-                            # С '*' връща всичките 16 конфигурационни ключета
-                            info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'*1', seq + 1)
-                            _logger.info(f"   📤 TX (device info cmd 90): {info_msg.hex(' ')}")
-                            connection.write(info_msg)
-                            connection.flush()
+            if info_resp and len(info_resp) > 20:
+                device_info = cls._parse_device_info(info_resp)
+                if device_info:
+                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
+                    return device_info
 
-                            time.sleep(1.5)
+            # Fallback
+            return {
+                'manufacturer': 'Datecs',
+                'model': 'Datecs FP v1.00BG',
+                'serial_number': 'DETECTED',
+                'protocol_name': 'datecs.fp.v1.isl',
+            }
 
-                            info_resp = bytearray()
-                            start_time = time.time()
-                            while time.time() - start_time < 2.0:
-                                if connection.in_waiting > 0:
-                                    chunk = connection.read(connection.in_waiting)
-                                    info_resp.extend(chunk)
-                                    time.sleep(0.1)
-                                else:
-                                    if len(info_resp) > 0:
-                                        time.sleep(0.3)
-                                        if connection.in_waiting == 0:
-                                            break
-                                    else:
-                                        time.sleep(0.1)
-
-                            info_resp = bytes(info_resp)
-                            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
-
-                            if info_resp and len(info_resp) > 20:
-                                device_info = cls._parse_device_info(info_resp)
-                                if device_info:
-                                    device_info['detected_baudrate'] = try_baudrate
-                                    _logger.info(f"   📋 Model: {device_info.get('model')}")
-                                    _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
-                                    _logger.info(f"   📋 Firmware: {device_info.get('firmware_version')}")
-                                    _logger.info("=" * 80)
-                                    return device_info
-
-                            # Fallback
-                            return {
-                                'manufacturer': 'Datecs',
-                                'model': 'Datecs FP v1.00BG',
-                                'serial_number': 'DETECTED',
-                                'protocol_name': 'datecs.fp.v1.isl',
-                                'detected_baudrate': try_baudrate,
-                            }
-
-            except Exception as e:
-                _logger.error(f"   ⚠️ Exception at {try_baudrate}: {e}", exc_info=True)
-                continue
-
-        _logger.info("\n" + "=" * 80)
-        _logger.info("❌ NO DATECS FP v1.00BG DEVICE DETECTED")
-        _logger.info("=" * 80)
-        return None
+        except Exception as e:
+            _logger.error(f"   ⚠️ Exception: {e}", exc_info=True)
+            return None
 
     @staticmethod
     def _parse_device_info(response: bytes) -> Optional[Dict[str, Any]]:
-        """
-        Парсва Datecs FP v1.00BG device info.
-
-        Според cmd 90 (5Ah) формат:
-        <Name>,<FwRev><Country><Sp><FwDate><Sp><FwTime>,<Chk>,<Sw>,<Ser>,<FM>
-
-        Пример: "FP-2000,1.00BG 04Nov08 1345,A5F3,0000000011110000,DT000600,02000600"
-        """
+        """Парсва Datecs FP v1.00BG device info (6 полета със запетая)."""
         try:
             _logger.info(f"   🔍 Parsing Datecs FP v1.00BG device info from {len(response)} bytes")
 
-            sep_pos = response.find(bytes([0x04]))  # SEPARATOR
+            sep_pos = response.find(bytes([0x04]))
             if sep_pos == -1 or sep_pos <= 4:
                 return None
 
@@ -1605,15 +1479,11 @@ class DatecsFPv1IslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             data_str = data.decode('cp1251', errors='ignore')
             _logger.info(f"   Data string: '{data_str}'")
 
-            # FP v1.00BG използва запетая като separator
             fields = data_str.split(',')
             _logger.info(f"   Comma-separated fields: {len(fields)}")
 
-            # Формат: Name, FwRev, Chk, Sw, Ser, FM
             if len(fields) >= 6:
                 _logger.info("   ✅ Detected Datecs FP v1.00BG protocol (6 comma fields)")
-
-                # Field 1: FwRev<Country> FwDate FwTime (например "1.00BG 04Nov08 1345")
                 fw_parts = fields[1].strip().split()
                 fw_version = fw_parts[0] if len(fw_parts) > 0 else fields[1].strip()
                 fw_date = fw_parts[1] if len(fw_parts) > 1 else ''
@@ -1621,12 +1491,10 @@ class DatecsFPv1IslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
 
                 return {
                     'manufacturer': 'Datecs',
-                    'model': fields[0].strip(),  # Name
+                    'model': fields[0].strip(),
                     'firmware_version': f"{fw_version} {fw_date} {fw_time}".strip(),
-                    'firmware_checksum': fields[2].strip(),  # Chk
-                    'config_switches': fields[3].strip(),  # Sw (16 битове)
-                    'serial_number': fields[4].strip(),  # Ser
-                    'fiscal_memory_serial': fields[5].strip(),  # FM
+                    'serial_number': fields[4].strip(),
+                    'fiscal_memory_serial': fields[5].strip(),
                     'protocol_name': 'datecs.fp.v1.isl',
                 }
 
