@@ -474,6 +474,56 @@ class DatecsIslFiscalPrinterBase(IslFiscalPrinterBase):
             "messages": [m.text for m in (status.messages + status.errors)],
         }
 
+    @classmethod
+    def supported(cls, device):
+        """
+        Проверява дали този драйвер поддържа устройството.
+
+        ВАЖНО: DatecsIslFiscalPrinterBase е абстрактен клас и не трябва
+        да се инстанцира директно.
+        """
+        _logger.info("=" * 80)
+        _logger.info(f"🔍 SUPPORTED() CHECK: {cls.__name__}")
+        _logger.info("=" * 80)
+
+        # Ако това е базовият Datecs клас - не поддържа нищо
+        if cls.__name__ == 'DatecsIslFiscalPrinterBase':
+            _logger.info(f"❌ {cls.__name__}: Base Datecs class - skipping")
+            return False
+
+        # ПРОМЯНА: Проверка дали класът е абстрактен
+        if hasattr(cls, '__abstractmethods__') and cls.__abstractmethods__:
+            _logger.warning(f"❌ {cls.__name__}: Abstract class with methods: {cls.__abstractmethods__}")
+            return False
+
+        # Ако няма detect_device метод - не може да детектира
+        if not hasattr(cls, 'detect_device'):
+            _logger.warning(f"❌ {cls.__name__}: No detect_device method")
+            return False
+
+        # Извлечи port path от device
+        if isinstance(device, str):
+            port = device
+        elif isinstance(device, dict):
+            port = device.get('identifier') or device.get('device')
+        else:
+            _logger.warning(f"❌ {cls.__name__}: Unknown device type: {type(device)}")
+            return False
+
+        if not port or not isinstance(port, str):
+            _logger.warning(f"❌ {cls.__name__}: Invalid port: {port}")
+            return False
+
+        # Провери дали е serial port
+        if not port.startswith('/dev/tty'):
+            _logger.info(f"❌ {cls.__name__}: Not a serial port: {port}")
+            return False
+
+        _logger.info(f"✅ {cls.__name__}: Valid serial port: {port}")
+        _logger.info(f"✅ {cls.__name__}: Will attempt detection in __init__")
+        _logger.info("=" * 80)
+
+        return True
 
 # ====================== DATECS P/C ПРОТОКОЛ (DP-25, DP-05, WP-50, DP-35) ======================
 
@@ -504,21 +554,21 @@ class DatecsPCIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
         - НЕ променяме baudrate-а
         - НЕ затваряме connection-а
         """
-        _logger.info(f"🔍 DATECS P/C DETECTION at {baudrate} baud")
+        _logger.debug(f"🔍 {cls.__name__} DETECTION at {baudrate} baud")
 
         try:
             # ISL STATUS команда
             seq = 0x20
             message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            _logger.debug(f"   📤 TX: {message.hex(' ')}")
             connection.write(message)
             connection.flush()
 
             time.sleep(0.5)
 
             response = connection.read(256)
-            _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
+            _logger.debug(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
 
             if not response or len(response) < 10:
                 return None
@@ -529,7 +579,7 @@ class DatecsPCIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             if not cls._validate_checksum(response):
                 return None
 
-            _logger.info(f"   ✅ Valid ISL response!")
+            _logger.debug(f"   ✅ Valid ISL response!")
 
             # Изчакай устройството
             connection.reset_input_buffer()
@@ -564,20 +614,14 @@ class DatecsPCIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             if info_resp and len(info_resp) > 20:
                 device_info = cls._parse_device_info(info_resp)
                 if device_info:
-                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   ✅ DETECTED: {device_info.get('model')} ({cls.__name__})")  # INFO само при успех
                     _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
                     return device_info
 
-            # Fallback - ако имаме валиден ISL отговор, но не можем да парсваме info
-            return {
-                'manufacturer': 'Datecs',
-                'model': 'Datecs P/C',
-                'serial_number': 'DETECTED',
-                'protocol_name': 'datecs.p.isl',
-            }
+            return None  # или fallback
 
         except Exception as e:
-            _logger.error(f"   ⚠️ Exception: {e}", exc_info=True)
+            _logger.debug(f"   ⚠️ Exception: {e}")
             return None
 
     @staticmethod
@@ -652,14 +696,14 @@ class DatecsXIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
         - НЕ променяме baudrate-а
         - НЕ затваряме connection-а
         """
-        _logger.info(f"🔍 DATECS X DETECTION at {baudrate} baud")
+        _logger.debug(f"🔍 {cls.__name__} DETECTION at {baudrate} baud")
 
         try:
             # ISL STATUS команда
             seq = 0x20
             message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            _logger.debug(f"   📤 TX: {message.hex(' ')}")
             connection.write(message)
             connection.flush()
 
@@ -677,7 +721,7 @@ class DatecsXIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             if not cls._validate_checksum(response):
                 return None
 
-            _logger.info(f"   ✅ Valid ISL response!")
+            _logger.debug(f"   ✅ Valid ISL response!")
 
             # Изчакай устройството
             connection.reset_input_buffer()
@@ -712,7 +756,7 @@ class DatecsXIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             if info_resp and len(info_resp) > 20:
                 device_info = cls._parse_device_info(info_resp)
                 if device_info:
-                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   ✅ DETECTED: {device_info.get('model')} ({cls.__name__})")  # INFO само при успех
                     _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
                     return device_info
 
@@ -778,6 +822,13 @@ class DatecsFPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
     device_name = "Datecs FP ISL Fiscal Printer"
     priority = 94
 
+    def __init__(self, identifier, device):
+        super().__init__(identifier, device)
+
+        # Update info според FMP спецификацията
+        self.info.comment_text_max_length = 70
+        self.info.item_text_max_length = 72
+
     @classmethod
     def get_baudrates_to_try(cls) -> List[int]:
         """Override - Datecs FP приоритизация."""
@@ -793,21 +844,21 @@ class DatecsFPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
         - НЕ променяме baudrate-а
         - НЕ затваряме connection-а
         """
-        _logger.info(f"🔍 DATECS FP DETECTION at {baudrate} baud")
+        _logger.debug(f"🔍 {cls.__name__} DETECTION at {baudrate} baud")
 
         try:
             # ISL STATUS команда
             seq = 0x20
             message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            _logger.debug(f"   📤 TX: {message.hex(' ')}")
             connection.write(message)
             connection.flush()
 
             time.sleep(0.5)
 
             response = connection.read(256)
-            _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
+            _logger.debug(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")  # DEBUG
 
             if not response or len(response) < 10:
                 return None
@@ -818,7 +869,7 @@ class DatecsFPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             if not cls._validate_checksum(response):
                 return None
 
-            _logger.info(f"   ✅ Valid ISL response!")
+            _logger.debug(f"   ✅ Valid ISL response!")
 
             # Изчакай устройството
             connection.reset_input_buffer()
@@ -826,7 +877,7 @@ class DatecsFPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
 
             # Device info със параметър "1"
             info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'1', seq + 1)
-            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
+            _logger.debug(f"   📤 TX (device info): {info_msg.hex(' ')}")
             connection.write(info_msg)
             connection.flush()
 
@@ -848,22 +899,16 @@ class DatecsFPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
                         time.sleep(0.05)
 
             info_resp = bytes(info_resp)
-            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
+            _logger.debug(f"   📥 RX (device info, {len(info_resp)} bytes)")
 
             if info_resp and len(info_resp) > 20:
                 device_info = cls._parse_device_info(info_resp)
                 if device_info:
-                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   ✅ DETECTED: {device_info.get('model')} ({cls.__name__})")  # INFO само при успех
                     _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
                     return device_info
 
-            # Fallback
-            return {
-                'manufacturer': 'Datecs',
-                'model': 'Datecs FP',
-                'serial_number': 'DETECTED',
-                'protocol_name': 'datecs.fp.isl',
-            }
+            return None
 
         except Exception as e:
             _logger.error(f"   ⚠️ Exception: {e}", exc_info=True)
@@ -956,14 +1001,14 @@ class DatecsFMPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
         - НЕ променяме baudrate-а
         - НЕ затваряме connection-а
         """
-        _logger.info(f"🔍 DATECS FMP/FP v2 DETECTION at {baudrate} baud")
+        _logger.debug(f"🔍 DATECS FMP/FP v2 DETECTION at {baudrate} baud")
 
         try:
             # ISL STATUS команда
             seq = 0x20
             message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            _logger.debug(f"   📤 TX: {message.hex(' ')}")
             connection.write(message)
             connection.flush()
 
@@ -981,7 +1026,7 @@ class DatecsFMPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             if not cls._validate_checksum(response):
                 return None
 
-            _logger.info(f"   ✅ Valid ISL response!")
+            _logger.debug(f"   ✅ Valid ISL response!")
 
             # Проверка за 8-байтов статус (FMP v2 характеристика)
             sep_pos = response.find(bytes([cls.MARKER_SEPARATOR]))
@@ -1003,7 +1048,7 @@ class DatecsFMPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
 
             # Device info
             info_msg = cls._build_detection_message(0x5A, b'1', seq + 1)
-            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
+            _logger.debug(f"   📤 TX (device info): {info_msg.hex(' ')}")
             connection.write(info_msg)
             connection.flush()
 
@@ -1030,17 +1075,11 @@ class DatecsFMPIslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             if info_resp and len(info_resp) > 20:
                 device_info = cls._parse_device_info(info_resp)
                 if device_info:
-                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   ✅ DETECTED: {device_info.get('model')} ({cls.__name__})")  # INFO само при успех
                     _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
                     return device_info
 
-            # Fallback
-            return {
-                'manufacturer': 'Datecs',
-                'model': 'Datecs FMP v2',
-                'serial_number': 'DETECTED',
-                'protocol_name': 'datecs.fmp.isl',
-            }
+            return None
 
         except Exception as e:
             _logger.error(f"   ⚠️ Exception: {e}", exc_info=True)
@@ -1378,21 +1417,21 @@ class DatecsFPv1IslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
         - НЕ променяме baudrate-а
         - НЕ затваряме connection-а
         """
-        _logger.info(f"🔍 DATECS FP v1.00BG DETECTION at {baudrate} baud")
+        _logger.debug(f"🔍 DATECS FP v1.00BG DETECTION at {baudrate} baud")
 
         try:
             # ISL STATUS команда
             seq = 0x20
             message = cls._build_detection_message(cls.CMD_GET_STATUS, b'', seq)
 
-            _logger.info(f"   📤 TX: {message.hex(' ')}")
+            _logger.debug(f"   📤 TX: {message.hex(' ')}")
             connection.write(message)
             connection.flush()
 
             time.sleep(0.5)
 
             response = connection.read(256)
-            _logger.info(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
+            _logger.debug(f"   📥 RX ({len(response)} bytes): {response.hex(' ') if response else 'TIMEOUT'}")
 
             if not response or len(response) < 10:
                 return None
@@ -1403,7 +1442,7 @@ class DatecsFPv1IslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
             if not cls._validate_checksum(response):
                 return None
 
-            _logger.info(f"   ✅ Valid ISL response!")
+            _logger.debug(f"   ✅ Valid ISL response!")
 
             # Проверка за 6-байтов статус
             sep_pos = response.find(bytes([cls.MARKER_SEPARATOR]))
@@ -1422,7 +1461,7 @@ class DatecsFPv1IslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
 
             # Device info
             info_msg = cls._build_detection_message(cls.CMD_GET_DEVICE_INFO, b'*1', seq + 1)
-            _logger.info(f"   📤 TX (device info): {info_msg.hex(' ')}")
+            _logger.debug(f"   📤 TX (device info): {info_msg.hex(' ')}")
             connection.write(info_msg)
             connection.flush()
 
@@ -1444,22 +1483,16 @@ class DatecsFPv1IslFiscalPrinterDriver(DatecsIslFiscalPrinterBase):
                         time.sleep(0.05)
 
             info_resp = bytes(info_resp)
-            _logger.info(f"   📥 RX (device info, {len(info_resp)} bytes)")
+            _logger.debug(f"   📥 RX (device info, {len(info_resp)} bytes)")
 
             if info_resp and len(info_resp) > 20:
                 device_info = cls._parse_device_info(info_resp)
                 if device_info:
-                    _logger.info(f"   📋 Model: {device_info.get('model')}")
+                    _logger.info(f"   ✅ DETECTED: {device_info.get('model')} ({cls.__name__})")  # INFO само при успех
                     _logger.info(f"   📋 Protocol: {device_info.get('protocol_name')}")
                     return device_info
 
-            # Fallback
-            return {
-                'manufacturer': 'Datecs',
-                'model': 'Datecs FP v1.00BG',
-                'serial_number': 'DETECTED',
-                'protocol_name': 'datecs.fp.v1.isl',
-            }
+            return None
 
         except Exception as e:
             _logger.error(f"   ⚠️ Exception: {e}", exc_info=True)

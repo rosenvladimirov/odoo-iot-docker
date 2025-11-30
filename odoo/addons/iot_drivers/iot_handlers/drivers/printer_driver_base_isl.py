@@ -254,9 +254,9 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         device_info = None
 
         for try_baudrate in baudrates_to_try:
-            _logger.info(f"\n{'=' * 60}")
-            _logger.info(f"🔄 Trying baudrate: {try_baudrate}")
-            _logger.info(f"{'=' * 60}")
+            _logger.debug(f"\n{'=' * 60}")  # ПРОМЯНА: DEBUG вместо INFO
+            _logger.debug(f"🔄 Trying baudrate: {try_baudrate}")
+            _logger.debug(f"{'=' * 60}")
 
             try:
                 import serial
@@ -272,7 +272,7 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
                     write_timeout=1.0,
                 )
 
-                _logger.info(f"   ✅ Connection opened at {try_baudrate} baud")
+                _logger.debug(f"   ✅ Connection opened at {try_baudrate} baud")  # ПРОМЯНА: DEBUG
 
                 # Изчисти буферите
                 connection.reset_input_buffer()
@@ -283,23 +283,26 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
                 device_info = self.detect_device(connection, try_baudrate)
 
                 if device_info:
-                    _logger.info(f"   ✅ Device detected at {try_baudrate} baud!")
+                    _logger.info(f"   ✅ Device detected at {try_baudrate} baud!")  # INFO само при успех
                     device_info['detected_baudrate'] = try_baudrate
                     break
                 else:
-                    _logger.info(f"   ❌ No device detected at {try_baudrate} baud")
+                    _logger.debug(f"   ❌ No device detected at {try_baudrate} baud")  # ПРОМЯНА: DEBUG
                     connection.close()
                     connection = None
 
             except Exception as e:
-                _logger.error(f"   ⚠️ Exception at {try_baudrate} baud: {e}", exc_info=True)
+                _logger.debug(f"   ⚠️ Exception at {try_baudrate} baud: {e}")  # ПРОМЯНА: DEBUG вместо ERROR
                 if connection and connection.is_open:
                     connection.close()
                 connection = None
                 continue
 
         if not connection or not device_info:
-            raise RuntimeError(f"Failed to detect {self.__class__.__name__} on {port}")
+            # ПРОМЯНА: DEBUG вместо WARNING
+            _logger.debug(f"⚠️ {self.__class__.__name__}: Device not detected on {port}")
+            _logger.debug("=" * 80)
+            raise RuntimeError(f"{self.__class__.__name__} could not detect device on {port}")
 
         _logger.info("=" * 80)
         _logger.info(f"✅ {self.__class__.__name__} initialized successfully")
@@ -1182,6 +1185,12 @@ class IslFiscalPrinterBase(SerialDriver, ABC):
         # Ако няма detect_device метод - не може да детектира
         if not hasattr(cls, 'detect_device') or cls.detect_device is IslFiscalPrinterBase.detect_device:
             _logger.warning(f"❌ {cls.__name__}: No detect_device implementation")
+            return False
+
+        # ПРОМЯНА: Проверка дали класът е абстрактен
+        # Ако има абстрактни методи - не го инстанцираме
+        if hasattr(cls, '__abstractmethods__') and cls.__abstractmethods__:
+            _logger.warning(f"❌ {cls.__name__}: Abstract class with methods: {cls.__abstractmethods__}")
             return False
 
         # Извлечи port path от device
